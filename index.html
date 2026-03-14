@@ -1382,7 +1382,7 @@ async function callAI(prompt, provider='gemini'){
   if(!useProvider){ toast('No API key found. Please add one in Settings or Create Test.','error'); return null; }
   try{
     if(useProvider==='gemini'){
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${gemKey}`,{
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${gemKey}`,{
         method:'POST', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:0.1,maxOutputTokens:8192}})
       });
@@ -1513,7 +1513,7 @@ Return ONLY the JSON array. No explanations or markdown.`;
           const b64 = img.includes(',') ? img.split(',')[1] : img;
           parts.push({inline_data:{mime_type:'image/jpeg',data:b64}});
         }
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${gemKey}`,{
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${gemKey}`,{
           method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:0.1,maxOutputTokens:8192}})
         });
@@ -3688,4 +3688,4 @@ window.onload = function(){
 };
 </script>
 </body>
-                                                                                    </html>
+</html>
