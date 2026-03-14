@@ -290,6 +290,35 @@ tr:hover td{background:var(--bg3)}
 .toppers-table td{text-align:center}
 .toppers-table .you-row{background:var(--primary-bg)}
 .you-badge{background:var(--primary);color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700}
+/* ===== SCORE POTENTIAL CARDS ===== */
+.potential-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+.pot-card{background:var(--bg3);border-radius:var(--radius-sm);padding:14px;text-align:center}
+.pot-card-val{font-size:24px;font-weight:900;margin-bottom:4px}
+.pot-card-label{font-size:11.5px;color:var(--text3)}
+.attempt-style-tag{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:var(--radius);background:var(--primary-bg);color:var(--primary);font-weight:700;font-size:13.5px;margin-top:12px}
+.missed-concept-item{display:flex;align-items:flex-start;gap:12px;padding:12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px}
+.missed-concept-num{width:28px;height:28px;border-radius:50%;background:var(--accent3);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.painful-chip{display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:20px;font-size:12px;font-weight:600;color:#dc2626;cursor:pointer}
+.qjourney-grid{display:flex;flex-wrap:wrap;gap:5px;padding:10px 0}
+.qj-btn{width:34px;height:34px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700;border:none;cursor:pointer}
+.qj-correct{background:#d1fae5;color:#059669;border:1.5px solid #6ee7b7}
+.qj-wrong{background:#fef2f2;color:#dc2626;border:1.5px solid #fca5a5}
+.qj-skip{background:var(--bg3);color:var(--text3);border:1.5px solid var(--border)}
+.qj-marked{background:#ede9fe;color:#7c3aed;border:1.5px solid #a78bfa}
+.ai-extract-stages{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.ai-stage{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:8px 12px;border-radius:var(--radius-sm);background:var(--bg3)}
+.ai-stage.done{background:#f0fdf4;color:#16a34a}
+.ai-stage.active{background:var(--primary-bg);color:var(--primary);font-weight:600}
+.ai-stage.pending{color:var(--text3)}
+@media(max-width:768px){
+  #sidebar{transform:translateX(-100%)}
+  #sidebar.open{transform:none}
+  #main{margin-left:0}
+  .grid-4{grid-template-columns:repeat(2,1fr)}
+  .grid-3{grid-template-columns:1fr}
+  .grid-2{grid-template-columns:1fr}
+  .potential-cards{grid-template-columns:1fr 1fr}
+}
 </style>
 </head>
 <body>
@@ -527,17 +556,18 @@ tr:hover td{background:var(--bg3)}
           </div>
         </div>
       </div>
-      <!-- Image Crop Mode (for image-based PDFs) -->
+      <!-- AI Auto-Extraction (replaces manual crop) -->
       <div id="crop-mode" style="display:none;margin-top:22px">
         <div class="card">
-          <div class="section-head">
-            <div>
-              <div class="card-title">✂️ Image Mode — Crop Questions</div>
-              <div class="card-subtitle">Text extraction failed. Crop each question from the PDF pages below.</div>
-            </div>
-            <button class="btn btn-primary" onclick="finalizeCropMode()">Done Cropping →</button>
+          <div class="card-title">🤖 AI Auto-Extracting Questions from Images</div>
+          <div class="card-subtitle">AI Vision is reading each page and extracting all questions — no manual cropping needed</div>
+          <div class="ai-extract-stages" id="ai-extract-stages">
+            <div class="ai-stage active" id="stage-render">⏳ Rendering PDF pages...</div>
+            <div class="ai-stage pending" id="stage-vision">🔍 AI Vision analyzing pages...</div>
+            <div class="ai-stage pending" id="stage-parse">📝 Parsing questions &amp; options...</div>
+            <div class="ai-stage pending" id="stage-done">✅ Done!</div>
           </div>
-          <div id="pdf-pages-container" style="display:flex;flex-direction:column;gap:16px"></div>
+          <div id="ai-extract-log" style="margin-top:12px;font-size:12px;color:var(--text3);max-height:140px;overflow-y:auto;background:var(--bg3);border-radius:var(--radius-sm);padding:10px;font-family:monospace"></div>
         </div>
       </div>
       <!-- Question Preview -->
@@ -1380,6 +1410,9 @@ async function extractAndCreate(){
   const file = APP.uploadedFiles.pdf;
   if(!file){ toast('Please upload a PDF or image first','error'); return; }
   
+  const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
+  if(!aiKey){ toast('Please add an API key in Settings first','error'); navigate('settings'); return; }
+  
   document.getElementById('extraction-progress').style.display = 'block';
   document.getElementById('extract-btn').disabled = true;
   
@@ -1392,22 +1425,23 @@ async function extractAndCreate(){
       text = result.text;
       images = result.images;
     } else if(file.type.startsWith('image/')){
-      images = [URL.createObjectURL(file)];
+      const reader = new FileReader();
+      const b64 = await new Promise(res=>{ reader.onload=e=>res(e.target.result); reader.readAsDataURL(file); });
+      images = [b64];
     }
     
     setExtractionStatus('Sending to AI for question extraction...', 60);
     
     let questions = [];
+    
     if(text && text.trim().length > 200){
-      // Text-based extraction
       questions = await extractQuestionsFromText(text, name);
-    } else if(images.length > 0){
-      // Image-based - show crop mode
-      setExtractionStatus('Image-based PDF detected — loading crop mode...', 80);
-      await showCropMode(images);
-      document.getElementById('extraction-progress').style.display = 'none';
-      document.getElementById('extract-btn').disabled = false;
-      return;
+    }
+    
+    // If text extraction got few/no questions, use AI Vision automatically
+    if((!questions || questions.length < 3) && images.length > 0){
+      setExtractionStatus('Using AI Vision on images...', 65);
+      questions = await autoExtractFromImages(images, name);
     }
     
     if(questions && questions.length > 0){
@@ -1416,18 +1450,120 @@ async function extractAndCreate(){
       setTimeout(()=>{ document.getElementById('extraction-progress').style.display = 'none'; }, 1000);
       showPreview(questions, name);
     } else {
-      throw new Error('No questions could be extracted');
+      throw new Error('No questions extracted. Check your API key or try a clearer PDF.');
     }
   }catch(err){
     toast('Extraction failed: '+err.message,'error');
     document.getElementById('extraction-progress').style.display = 'none';
-    // Fallback to crop mode
-    if(file.type === 'application/pdf'){
-      const pages = await renderPDFPages(file);
-      showCropMode(pages);
-    }
   }
   document.getElementById('extract-btn').disabled = false;
+}
+
+// AUTO AI VISION EXTRACTION (replaces manual crop system)
+async function autoExtractFromImages(images, name){
+  document.getElementById('crop-mode').style.display = 'block';
+  const setStage = (id)=>{
+    ['stage-render','stage-vision','stage-parse','stage-done'].forEach(s=>{
+      const el = document.getElementById(s);
+      if(!el) return;
+      const isDone = el.className.includes('done');
+      el.className = 'ai-stage '+(s===id?'active':(isDone?'done':'pending'));
+    });
+  };
+  const markDone = (id)=>{ const el=document.getElementById(id); if(el) el.className='ai-stage done'; };
+  const addLog = (msg)=>{
+    const el=document.getElementById('ai-extract-log');
+    if(el){ el.innerHTML+=`<div>${msg}</div>`; el.scrollTop=el.scrollHeight; }
+  };
+  
+  setStage('stage-render');
+  markDone('stage-render');
+  addLog(`✓ ${images.length} page(s) loaded`);
+  setStage('stage-vision');
+  addLog('→ Sending to AI Vision...');
+  
+  let allQuestions = [];
+  const gemKey = localStorage.getItem('gemini_key');
+  const oaiKey = localStorage.getItem('openai_key');
+  const batchSize = 2;
+  
+  for(let i=0; i<images.length; i+=batchSize){
+    const batch = images.slice(i, i+batchSize);
+    addLog(`Processing pages ${i+1}–${Math.min(i+batchSize, images.length)}...`);
+    const prompt = `You are an expert JEE question extractor. These are pages from a JEE/NEET exam paper.
+Extract ALL questions visible on these pages. Return ONLY a valid JSON array.
+
+Each question object must have:
+- subject: "Physics", "Chemistry", or "Mathematics"
+- topic: chapter/topic name
+- type: "MCQ", "MULTIPLE", or "INTEGER"
+- question: full question text (preserve math as plain text)
+- options: array of {label:"A",text:"..."} for MCQ/MULTIPLE, empty array [] for INTEGER
+- correctAnswer: the correct option label (e.g. "A") or integer value if visible, else ""
+- difficulty: "Easy", "Moderate", or "Hard"
+- solution: "" unless visible on page
+
+Return ONLY the JSON array. No explanations or markdown.`;
+    
+    try{
+      let result = null;
+      if(gemKey){
+        const parts = [{text: prompt}];
+        for(const img of batch){
+          const b64 = img.includes(',') ? img.split(',')[1] : img;
+          parts.push({inline_data:{mime_type:'image/jpeg',data:b64}});
+        }
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${gemKey}`,{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:0.1,maxOutputTokens:8192}})
+        });
+        const data = await res.json();
+        if(data.error) throw new Error(data.error.message);
+        result = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      } else if(oaiKey){
+        const msgContent = [{type:'text',text:prompt}];
+        for(const img of batch){
+          msgContent.push({type:'image_url',image_url:{url:img.startsWith('data:')?img:'data:image/jpeg;base64,'+img,detail:'high'}});
+        }
+        const res = await fetch('https://api.openai.com/v1/chat/completions',{
+          method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+oaiKey},
+          body:JSON.stringify({model:'gpt-4o',messages:[{role:'user',content:msgContent}],max_tokens:8000,temperature:0.1})
+        });
+        const data = await res.json();
+        if(data.error) throw new Error(data.error.message);
+        result = data.choices?.[0]?.message?.content || '';
+      }
+      if(result){
+        const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+        const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
+        if(s!==-1 && e!==-1){
+          const parsed = JSON.parse(cleaned.substring(s,e+1));
+          allQuestions = allQuestions.concat(parsed);
+          addLog(`✓ Found ${parsed.length} Qs on pages ${i+1}–${Math.min(i+batchSize,images.length)}`);
+        }
+      }
+    }catch(err){
+      addLog(`⚠ Pages ${i+1}–${Math.min(i+batchSize,images.length)}: ${err.message}`);
+    }
+  }
+  
+  markDone('stage-vision');
+  setStage('stage-parse');
+  
+  // Deduplicate by question text
+  const deduped = [];
+  const seen = new Set();
+  allQuestions.forEach((q,i)=>{
+    const key = (q.question||'').substring(0,80);
+    if(!seen.has(key)){ seen.add(key); deduped.push({...q, id:deduped.length+1}); }
+  });
+  
+  addLog(`✓ ${deduped.length} unique questions extracted total`);
+  markDone('stage-parse');
+  setStage('stage-done');
+  markDone('stage-done');
+  setTimeout(()=>{ document.getElementById('crop-mode').style.display='none'; }, 1800);
+  return deduped;
 }
 
 async function extractPDFText(file){
@@ -1503,51 +1639,7 @@ Return format: [{"id":1,"subject":"Physics","topic":"Kinematics","type":"MCQ","q
   }
 }
 
-// ===================== CROP MODE =====================
-async function showCropMode(pages){
-  document.getElementById('crop-mode').style.display = 'block';
-  const container = document.getElementById('pdf-pages-container');
-  container.innerHTML = '';
-  APP._cropPages = pages;
-  APP._croppedQues = [];
-  
-  pages.forEach((src,i)=>{
-    const div = document.createElement('div');
-    div.innerHTML = `
-      <div style="margin-bottom:10px;font-weight:700;font-size:13px">Page ${i+1}</div>
-      <div style="position:relative;display:inline-block;max-width:100%;border:2px solid var(--border);border-radius:var(--radius-sm);overflow:hidden">
-        <img src="${src}" style="max-width:100%;display:block" id="crop-img-${i}">
-        <canvas id="crop-canvas-${i}" style="position:absolute;top:0;left:0;pointer-events:none"></canvas>
-      </div>
-      <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-secondary btn-sm" onclick="startCrop(${i})">✂️ Select Question Area</button>
-        <button class="btn btn-ghost btn-sm" onclick="addWholePageAsQue(${i},'${src}')">+ Add Whole Page as Question</button>
-      </div>
-      <div id="crop-ques-${i}" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px"></div>
-    `;
-    container.appendChild(div);
-  });
-}
-
-function addWholePageAsQue(pageIdx, src){
-  if(!APP._croppedQues) APP._croppedQues = [];
-  APP._croppedQues.push({image:src, pageIdx, subject:'', type:'MCQ', question:`Q${APP._croppedQues.length+1}`, options:[{label:'A',text:'Option A'},{label:'B',text:'Option B'},{label:'C',text:'Option C'},{label:'D',text:'Option D'}], correctAnswer:'', difficulty:'Moderate'});
-  toast(`Page ${pageIdx+1} added as question #${APP._croppedQues.length}`,'success');
-  const container = document.getElementById('crop-ques-'+pageIdx);
-  if(container){
-    const chip = document.createElement('div');
-    chip.className = 'badge badge-green';
-    chip.textContent = `Q${APP._croppedQues.length} added`;
-    container.appendChild(chip);
-  }
-}
-
-function finalizeCropMode(){
-  if(!APP._croppedQues || !APP._croppedQues.length){ toast('Please crop at least one question','error'); return; }
-  APP.extractedQuestions = APP._croppedQues.map((q,i)=>({...q, id:i+1, subject:q.subject||'Physics', topic:'Unknown'}));
-  document.getElementById('crop-mode').style.display = 'none';
-  showPreview(APP.extractedQuestions, document.getElementById('test-name-input').value||'My Test');
-}
+// Manual crop mode removed — replaced by AI auto-extraction (autoExtractFromImages)
 
 // ===================== PREVIEW =====================
 function showPreview(questions, name){
@@ -2038,7 +2130,8 @@ function finalizeSubmission(){
       responses: resps,
       answerKey: key,
       subjectMovement: exam.subjectMovement,
-      mistakeTypes: getMistakeTypeSummary()
+      mistakeTypes: getMistakeTypeSummary(),
+      config: { correctMarks: config.correctMarks||4, wrongMarks: config.wrongMarks||1, type: config.type }
     };
     testRecord.attempts = testRecord.attempts||[];
     testRecord.attempts.push(attempt);
@@ -2134,28 +2227,34 @@ function renderAnalysis(test, attempt){
     </div>
 
     <!-- ANALYSIS TABS -->
-    <div class="tabs" id="analysis-tabs">
+    <div class="tabs" id="analysis-tabs" style="overflow-x:auto;white-space:nowrap;display:flex">
       <div class="tab active" onclick="switchAnalysisTab('overview',this)">📊 Overview</div>
       <div class="tab" onclick="switchAnalysisTab('performance',this)">📈 Performance</div>
-      <div class="tab" onclick="switchAnalysisTab('time',this)">⏱ Time</div>
-      <div class="tab" onclick="switchAnalysisTab('difficulty',this)">🎯 Difficulty</div>
+      <div class="tab" onclick="switchAnalysisTab('potential',this)">🎯 Score Potential</div>
+      <div class="tab" onclick="switchAnalysisTab('time',this)">⏱ Time Analysis</div>
+      <div class="tab" onclick="switchAnalysisTab('difficulty',this)">💪 Difficulty</div>
       <div class="tab" onclick="switchAnalysisTab('chapters',this)">📚 Chapters</div>
       <div class="tab" onclick="switchAnalysisTab('mistakes',this)">❌ Mistakes</div>
+      <div class="tab" onclick="switchAnalysisTab('missed',this)">⚠️ Missed Concepts</div>
       <div class="tab" onclick="switchAnalysisTab('movement',this)">🔀 Movement</div>
-      <div class="tab" onclick="switchAnalysisTab('ai',this)">🤖 AI Analysis</div>
+      <div class="tab" onclick="switchAnalysisTab('journey',this)">🗺️ Q Journey</div>
       <div class="tab" onclick="switchAnalysisTab('qbyq',this)">📝 Q by Q</div>
+      <div class="tab" onclick="switchAnalysisTab('ai',this)">🤖 AI Analysis</div>
     </div>
 
     <!-- TAB PANELS -->
     <div id="at-overview" class="tab-panel active">${renderOverviewTab(attempt, stats, test)}</div>
     <div id="at-performance" class="tab-panel">${renderPerformanceTab(attempt, stats, qs, resps)}</div>
+    <div id="at-potential" class="tab-panel">${renderScorePotentialTab(attempt)}</div>
     <div id="at-time" class="tab-panel">${renderTimeTab(attempt, stats, qs, resps)}</div>
     <div id="at-difficulty" class="tab-panel">${renderDifficultyTab(qs, resps, attempt.answerKey)}</div>
     <div id="at-chapters" class="tab-panel">${renderChaptersTab(ch)}</div>
     <div id="at-mistakes" class="tab-panel">${renderMistakesTab(qs, resps, attempt)}</div>
+    <div id="at-missed" class="tab-panel">${renderMissedConceptsTab(qs, resps, attempt)}</div>
     <div id="at-movement" class="tab-panel">${renderMovementTab(attempt)}</div>
-    <div id="at-ai" class="tab-panel"><div style="text-align:center;padding:30px;color:var(--text3)"><div style="font-size:24px;margin-bottom:12px">🤖</div><div style="font-weight:700;margin-bottom:8px">AI Analysis</div><div style="font-size:13px;margin-bottom:16px">Get personalized AI insights on your performance</div><button class="btn btn-primary" onclick="runAIAnalysis()">Generate AI Analysis</button></div><div id="ai-analysis-result"></div></div>
+    <div id="at-journey" class="tab-panel">${renderQuestionJourneyTab(qs, resps, attempt)}</div>
     <div id="at-qbyq" class="tab-panel">${renderQbyQ(qs, resps, attempt.answerKey)}</div>
+    <div id="at-ai" class="tab-panel"><div style="text-align:center;padding:30px;color:var(--text3)"><div style="font-size:24px;margin-bottom:12px">🤖</div><div style="font-weight:700;margin-bottom:8px">AI Analysis</div><div style="font-size:13px;margin-bottom:16px">Get personalized AI insights on your performance</div><button class="btn btn-primary" onclick="runAIAnalysis()">Generate AI Analysis</button></div><div id="ai-analysis-result"></div></div>
     
     <!-- LEARNINGS & SAVINGS -->
     <div style="margin-top:24px" class="card">
@@ -2204,16 +2303,53 @@ function renderOverviewTab(attempt, stats, test){
         <canvas id="subj-chart" height="180"></canvas>
       </div>
     </div>
-    <div class="card">
-      <div class="card-title">📊 Toppers Comparison</div>
+    <div class="card" style="margin-top:18px">
+      <div class="card-title">📊 Leaderboard Comparison</div>
+      <div class="card-subtitle">How you compare against top performers</div>
       <div class="table-wrap">
         <table class="toppers-table">
           <thead><tr><th>Student</th><th>Score</th><th>Accuracy</th><th>Correct</th><th>Wrong</th><th>Skipped</th></tr></thead>
           <tbody>
-            <tr class="you-row"><td><span class="you-badge">YOU</span></td><td style="font-weight:800;font-size:15px">${attempt.score}/${attempt.maxScore}</td><td>${attempt.accuracy}%</td><td style="color:var(--accent2)">${attempt.correct}</td><td style="color:var(--accent3)">${attempt.wrong}</td><td>${attempt.skipped}</td></tr>
-            <tr><td>🏆 Topper</td><td>${attempt.maxScore}/${attempt.maxScore}</td><td>100%</td><td>${attempt.total}</td><td>0</td><td>0</td></tr>
-            <tr><td>Top 10%ile</td><td>${Math.round(attempt.maxScore*0.85)}/${attempt.maxScore}</td><td>92%</td><td>${Math.round(attempt.total*0.85)}</td><td>2</td><td>${Math.round(attempt.total*0.15)}</td></tr>
-            <tr><td>Top 25%ile</td><td>${Math.round(attempt.maxScore*0.72)}/${attempt.maxScore}</td><td>85%</td><td>${Math.round(attempt.total*0.7)}</td><td>3</td><td>${Math.round(attempt.total*0.3)}</td></tr>
+            <tr class="you-row">
+              <td><span class="you-badge">YOU</span></td>
+              <td style="font-weight:800;font-size:15px">${attempt.score}/${attempt.maxScore}</td>
+              <td>${attempt.accuracy}%</td>
+              <td style="color:var(--accent2)">${attempt.correct}</td>
+              <td style="color:var(--accent3)">${attempt.wrong}</td>
+              <td>${attempt.skipped}</td>
+            </tr>
+            <tr>
+              <td>🏆 Topper</td>
+              <td>${attempt.maxScore}/${attempt.maxScore}</td>
+              <td>100%</td>
+              <td>${attempt.total}</td>
+              <td>0</td>
+              <td>0</td>
+            </tr>
+            <tr>
+              <td>Top 10%ile</td>
+              <td>${Math.round(attempt.maxScore*0.84)}/${attempt.maxScore}</td>
+              <td>93%</td>
+              <td>${Math.round(attempt.total*0.80)}</td>
+              <td>0</td>
+              <td>${Math.round(attempt.total*0.20)}</td>
+            </tr>
+            <tr>
+              <td>Top 25%ile</td>
+              <td>${Math.round(attempt.maxScore*0.72)}/${attempt.maxScore}</td>
+              <td>88%</td>
+              <td>${Math.round(attempt.total*0.70)}</td>
+              <td>2</td>
+              <td>${Math.round(attempt.total*0.27)}</td>
+            </tr>
+            <tr style="color:var(--text3)">
+              <td>Average (50%ile)</td>
+              <td>${Math.round(attempt.maxScore*0.42)}/${attempt.maxScore}</td>
+              <td>65%</td>
+              <td>${Math.round(attempt.total*0.45)}</td>
+              <td>5</td>
+              <td>${Math.round(attempt.total*0.38)}</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -2466,16 +2602,261 @@ function renderMovementTab(attempt){
   `;
 }
 
+// ===== SCORE POTENTIAL TAB =====
+function renderScorePotentialTab(attempt){
+  const cm = attempt.config?.correctMarks || 4;
+  const wm = attempt.config?.wrongMarks || 1;
+  const actual = attempt.score;
+  const noNeg = attempt.correct * cm;
+  const halfErr = actual + Math.round(attempt.wrong/2) * (cm + wm);
+  const threeQErr = actual + Math.round(attempt.wrong*0.75) * (cm + wm);
+  const maxAchiev = attempt.score + attempt.skipped * cm;
+  const style = attempt.wrong > attempt.total*0.2
+    ? '⚡ The Gambler — You attempt risky guesses. Try being more selective.'
+    : attempt.skipped > attempt.total*0.4
+    ? '🔒 The Conservative — You skip too much. Try attempting more safe questions.'
+    : '⚖️ Balanced — Great strategy! Focus on improving accuracy now.';
+
+  return `
+    <div class="potential-cards">
+      <div class="pot-card">
+        <div class="pot-card-val" style="color:${actual>=0?'var(--accent2)':'var(--accent3)'}">${actual}</div>
+        <div class="pot-card-label">Actual Score</div>
+      </div>
+      <div class="pot-card">
+        <div class="pot-card-val" style="color:var(--accent2)">${noNeg}</div>
+        <div class="pot-card-label">Without Negatives</div>
+      </div>
+      <div class="pot-card">
+        <div class="pot-card-val" style="color:var(--accent3)">${attempt.wrong * wm}</div>
+        <div class="pot-card-label">Lost to Negatives</div>
+      </div>
+      <div class="pot-card">
+        <div class="pot-card-val" style="color:var(--primary)">${maxAchiev}</div>
+        <div class="pot-card-label">Max Achievable</div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-title">📈 Score If You Reduced Errors</div>
+      <div class="card-subtitle">See how reducing wrong answers would improve your score</div>
+      <canvas id="potential-chart" height="200"></canvas>
+      <div class="attempt-style-tag">${style}</div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-title">🔍 What-If Analysis</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Scenario</th><th>Score</th><th>Change</th><th>Accuracy Impact</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Actual Score</strong></td><td><strong>${actual}/${attempt.maxScore}</strong></td><td>—</td><td>${attempt.accuracy}%</td></tr>
+            <tr><td>50% fewer wrong answers</td><td>${halfErr}/${attempt.maxScore}</td><td style="color:var(--accent2)">+${halfErr-actual}</td><td>~${Math.round((attempt.correct+attempt.wrong*0.5)/(attempt.correct+attempt.wrong)*100)||0}%</td></tr>
+            <tr><td>75% fewer wrong answers</td><td>${threeQErr}/${attempt.maxScore}</td><td style="color:var(--accent2)">+${threeQErr-actual}</td><td>~${Math.round((attempt.correct+attempt.wrong*0.25)/(attempt.correct+attempt.wrong)*100)||0}%</td></tr>
+            <tr><td>Zero negatives (skip instead)</td><td>${noNeg}/${attempt.maxScore}</td><td style="color:var(--accent2)">+${noNeg-actual}</td><td>100%</td></tr>
+            <tr><td>Max achievable (attempt all skipped)</td><td>${maxAchiev}/${attempt.maxScore}</td><td style="color:var(--primary)">+${maxAchiev-actual}</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="grid grid-2">
+      <div class="card">
+        <div class="card-title">Current Attempt Stats</div>
+        <div style="display:flex;flex-direction:column;gap:10px;padding:8px 0">
+          <div style="display:flex;justify-content:space-between;padding:10px;background:var(--bg3);border-radius:var(--radius-sm)">
+            <span style="font-size:13px">Actual Score</span>
+            <span style="font-weight:800;font-size:16px;color:${actual>=0?'var(--accent2)':'var(--accent3)'}">${actual}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:10px;background:var(--bg3);border-radius:var(--radius-sm)">
+            <span style="font-size:13px">Without Negatives</span>
+            <span style="font-weight:800;font-size:16px">${noNeg}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:10px;background:#fef2f2;border-radius:var(--radius-sm)">
+            <span style="font-size:13px">Lost to Negatives</span>
+            <span style="font-weight:800;font-size:16px;color:var(--accent3)">${attempt.wrong * wm}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:10px;background:var(--primary-bg);border-radius:var(--radius-sm)">
+            <span style="font-size:13px">Max Achievable</span>
+            <span style="font-weight:800;font-size:16px;color:var(--primary)">${maxAchiev}</span>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">Attempt Style Analysis</div>
+        <div style="padding:16px 0;display:flex;flex-direction:column;gap:12px">
+          <div>
+            <div style="font-size:12.5px;font-weight:600;color:var(--text2);margin-bottom:6px">Questions Attempted</div>
+            <div class="progress-bar"><div class="progress-fill" style="width:${Math.round((attempt.correct+attempt.wrong)/attempt.total*100)}%;background:var(--primary)"></div></div>
+            <div style="font-size:11.5px;color:var(--text3);margin-top:4px">${attempt.correct+attempt.wrong} of ${attempt.total} (${Math.round((attempt.correct+attempt.wrong)/attempt.total*100)}%)</div>
+          </div>
+          <div>
+            <div style="font-size:12.5px;font-weight:600;color:var(--text2);margin-bottom:6px">Accuracy on Attempted</div>
+            <div class="progress-bar"><div class="progress-fill" style="width:${attempt.accuracy}%;background:${attempt.accuracy>70?'var(--accent2)':attempt.accuracy>50?'#f59e0b':'var(--accent3)'}"></div></div>
+            <div style="font-size:11.5px;color:var(--text3);margin-top:4px">${attempt.accuracy}% accuracy</div>
+          </div>
+          <div style="padding:12px;background:var(--primary-bg);border-radius:var(--radius-sm);font-size:13px;font-weight:600;color:var(--primary)">${style}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ===== MISSED CONCEPTS TAB =====
+function renderMissedConceptsTab(qs, resps, attempt){
+  const missed = {};
+  qs.forEach((q,i)=>{
+    const r = resps[i];
+    if(r.result==='wrong' || (!r.answer && r.status!=='not-visited')){
+      const key = (q.topic||'Unknown')+'___'+(q.subject||'Unknown');
+      if(!missed[key]) missed[key]={topic:q.topic||'Unknown',subject:q.subject||'Unknown',wrong:0,skipped:0,qs:[]};
+      if(r.result==='wrong') missed[key].wrong++;
+      else missed[key].skipped++;
+      missed[key].qs.push(i+1);
+    }
+  });
+
+  const bySubject = {};
+  Object.values(missed).forEach(m=>{
+    if(!bySubject[m.subject]) bySubject[m.subject]=[];
+    bySubject[m.subject].push(m);
+  });
+
+  const subjectBadge = {Physics:'badge-purple',Chemistry:'badge-green',Mathematics:'badge-orange'};
+
+  if(!Object.keys(bySubject).length){
+    return `<div class="card"><div style="text-align:center;padding:40px;color:var(--accent2)"><div style="font-size:42px;margin-bottom:12px">🎉</div><div style="font-weight:700;font-size:16px">No Missed Concepts!</div><div style="font-size:13px;color:var(--text3);margin-top:6px">You answered everything correctly or the answer key wasn't provided.</div></div></div>`;
+  }
+
+  return `
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-title">⚠️ Topics You Need to Revise</div>
+      <div class="card-subtitle">Chapters where you got questions wrong or skipped — focus your revision here</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px">
+        ${Object.entries(bySubject).map(([s,arr])=>`<div class="badge ${subjectBadge[s]||'badge-gray'}">${s}: ${arr.length} topic${arr.length>1?'s':''}</div>`).join('')}
+      </div>
+      ${Object.entries(bySubject).map(([subj,topics])=>`
+        <div style="margin-bottom:22px">
+          <div style="font-weight:800;font-size:14px;color:var(--text);margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid var(--border);display:flex;align-items:center;gap:8px">
+            <span class="badge ${subjectBadge[subj]||'badge-gray'}">${subj}</span>
+            <span style="font-size:12px;color:var(--text3)">${topics.length} concept${topics.length>1?'s':''} to revise</span>
+          </div>
+          ${topics.sort((a,b)=>(b.wrong+b.skipped)-(a.wrong+a.skipped)).map((m,idx)=>`
+            <div class="missed-concept-item">
+              <div class="missed-concept-num">${idx+1}</div>
+              <div style="flex:1">
+                <div style="font-weight:700;font-size:13.5px;margin-bottom:6px">${m.topic}</div>
+                <div style="display:flex;gap:10px;font-size:12px;flex-wrap:wrap;margin-bottom:6px">
+                  ${m.wrong>0?`<span style="color:var(--accent3);font-weight:600">❌ ${m.wrong} wrong</span>`:''}
+                  ${m.skipped>0?`<span style="color:var(--text3);font-weight:600">⏭ ${m.skipped} skipped</span>`:''}
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:4px">
+                  ${m.qs.map(q=>`<span class="painful-chip">Q${q}</span>`).join('')}
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+// ===== QUESTION JOURNEY TAB =====
+function renderQuestionJourneyTab(qs, resps, attempt){
+  const groups = {'0–30 min':[],'30–60 min':[],'60–90 min':[],'90–120 min':[],'120+ min':[]};
+  let cumTime = 0;
+  Object.entries(resps).forEach(([i,r])=>{
+    cumTime += (r.timeSpent||0);
+    const min = Math.floor(cumTime/60);
+    const grp = min<30?'0–30 min':min<60?'30–60 min':min<90?'60–90 min':min<120?'90–120 min':'120+ min';
+    groups[grp].push({i:parseInt(i),r});
+  });
+
+  const qCls = r => r.result==='correct'?'qj-correct':r.result==='wrong'?'qj-wrong':(r.status==='marked'||r.status==='marked-answered')?'qj-marked':'qj-skip';
+
+  const hourStats = Object.entries(groups).map(([label,arr])=>({
+    label,
+    correct:arr.filter(x=>x.r.result==='correct').length,
+    wrong:arr.filter(x=>x.r.result==='wrong').length,
+    skip:arr.filter(x=>x.r.result!=='correct'&&x.r.result!=='wrong').length
+  })).filter(x=>x.correct+x.wrong+x.skip>0);
+
+  return `
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-title">🗺️ Question Journey</div>
+      <div class="card-subtitle">Your path through the test — click any question to jump to Q by Q analysis</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px"><div style="width:14px;height:14px;border-radius:3px;background:#d1fae5;border:1.5px solid #6ee7b7"></div>Correct</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px"><div style="width:14px;height:14px;border-radius:3px;background:#fef2f2;border:1.5px solid #fca5a5"></div>Wrong</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px"><div style="width:14px;height:14px;border-radius:3px;background:#ede9fe;border:1.5px solid #a78bfa"></div>Marked</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px"><div style="width:14px;height:14px;border-radius:3px;background:var(--bg3);border:1.5px solid var(--border)"></div>Skipped</div>
+      </div>
+      ${Object.entries(groups).filter(([,arr])=>arr.length>0).map(([label,arr])=>`
+        <div style="margin-bottom:18px">
+          <div style="font-size:12px;font-weight:700;color:var(--text3);margin-bottom:8px">⏰ ${label} — ${arr.length} question${arr.length>1?'s':''}</div>
+          <div class="qjourney-grid">
+            ${arr.map(({i,r})=>`
+              <button class="qj-btn ${qCls(r)}" title="Q${i+1} · ${r.result||'skipped'} · ${formatTime(r.timeSpent)}" onclick="jumpToQInAnalysis(${i})">${i+1}</button>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-title">📊 Performance by Hour</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time Period</th><th>Questions</th><th>Correct</th><th>Wrong</th><th>Skipped</th><th>Accuracy</th></tr></thead>
+          <tbody>
+            ${hourStats.map(h=>`
+              <tr>
+                <td><strong>${h.label}</strong></td>
+                <td>${h.correct+h.wrong+h.skip}</td>
+                <td style="color:var(--accent2)">${h.correct}</td>
+                <td style="color:var(--accent3)">${h.wrong}</td>
+                <td style="color:var(--text3)">${h.skip}</td>
+                <td>${h.correct+h.wrong>0?Math.round(h.correct/(h.correct+h.wrong)*100):0}%</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="grid grid-3" style="margin-bottom:18px">
+      <div style="text-align:center;padding:16px;background:var(--bg3);border-radius:var(--radius-sm)">
+        <div style="font-size:28px;font-weight:900;color:var(--accent2)">${attempt.correct}</div>
+        <div style="font-size:12px;color:var(--text3)">Correct</div>
+      </div>
+      <div style="text-align:center;padding:16px;background:var(--bg3);border-radius:var(--radius-sm)">
+        <div style="font-size:28px;font-weight:900;color:var(--accent3)">${attempt.wrong}</div>
+        <div style="font-size:12px;color:var(--text3)">Wrong</div>
+      </div>
+      <div style="text-align:center;padding:16px;background:var(--bg3);border-radius:var(--radius-sm)">
+        <div style="font-size:28px;font-weight:900;color:var(--text3)">${attempt.skipped}</div>
+        <div style="font-size:12px;color:var(--text3)">Skipped</div>
+      </div>
+    </div>
+  `;
+}
+
+function jumpToQInAnalysis(idx){
+  const tab = document.querySelector('[onclick*="qbyq"]');
+  if(tab) tab.click();
+  setTimeout(()=>{
+    const el = document.getElementById('qbyq-q-'+idx);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'center'});
+  }, 150);
+}
+
+
 function renderQbyQ(qs, resps, ansKey){
   return `
     <div class="card">
       <div class="card-title">Question-by-Question Analysis</div>
       <div style="display:flex;flex-direction:column;gap:14px;margin-top:12px">
-        ${qs.slice(0,30).map((q,i)=>{
+        ${qs.map((q,i)=>{
           const r = resps[i];
           const correct = ansKey?.[i];
           return `
-            <div style="border:1.5px solid ${r.result==='correct'?'#6ee7b7':r.result==='wrong'?'#fca5a5':'var(--border)'};border-radius:var(--radius-sm);padding:14px;background:${r.result==='correct'?'#f0fdf4':r.result==='wrong'?'#fff5f5':'var(--bg2)'}">
+            <div id="qbyq-q-${i}" style="border:1.5px solid ${r.result==='correct'?'#6ee7b7':r.result==='wrong'?'#fca5a5':'var(--border)'};border-radius:var(--radius-sm);padding:14px;background:${r.result==='correct'?'#f0fdf4':r.result==='wrong'?'#fff5f5':'var(--bg2)'}">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
                 <span style="font-weight:800;font-size:13px">Q${i+1}</span>
                 <span class="badge badge-purple">${q.subject}</span>
@@ -2494,7 +2875,7 @@ function renderQbyQ(qs, resps, ansKey){
             </div>
           `;
         }).join('')}
-        ${qs.length>30?`<div style="text-align:center;color:var(--text3);font-size:13px;padding:12px">Showing first 30 of ${qs.length} questions</div>`:''}
+
       </div>
     </div>
   `;
@@ -2502,11 +2883,15 @@ function renderQbyQ(qs, resps, ansKey){
 
 function switchAnalysisTab(name, el){
   document.querySelectorAll('#analysis-tabs .tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('#analysis-body .tab-panel').forEach(p=>p.classList.remove('active'));
   el.classList.add('active');
   const panel = document.getElementById('at-'+name);
-  if(panel){ panel.classList.add('active'); }
-  setTimeout(()=>initAnalysisCharts(APP.currentTest?.attempt, APP.currentTest?.attempt?.subjectStats, APP.currentTest?.test?.questions, APP.currentTest?.attempt?.responses),50);
+  if(panel) panel.classList.add('active');
+  // Re-init charts after tab switch (needed for canvas elements)
+  setTimeout(()=>{
+    const a = APP.currentTest?.attempt;
+    if(a) initAnalysisCharts(a, a.subjectStats, APP.currentTest?.test?.questions, a.responses);
+  }, 60);
 }
 
 function initAnalysisCharts(attempt, stats, qs, resps){
@@ -2573,11 +2958,29 @@ function initAnalysisCharts(attempt, stats, qs, resps){
     ]
   },{scales:{y:{beginAtZero:true}}});
   
-  // Potential chart
+  // Score Potential chart (in Score Potential tab)
+  const cm = attempt.config?.correctMarks||4;
+  const wm = attempt.config?.wrongMarks||1;
   tryChart('potential-chart','bar',{
-    labels:['Actual','50% less error','75% less error','100% less error'],
-    datasets:[{label:'Score',data:[attempt.score,attempt.score+Math.round(attempt.wrong/2)*5,attempt.score+Math.round(attempt.wrong*0.75)*5,attempt.correct*4+attempt.wrong],backgroundColor:['rgba(91,79,207,0.8)','rgba(91,79,207,0.5)','rgba(91,79,207,0.4)','rgba(91,79,207,0.3)']}]
-  },{scales:{y:{beginAtZero:true}}});
+    labels:['Actual Score','50% fewer errors','75% fewer errors','Zero negatives','Max achievable'],
+    datasets:[{
+      label:'Score',
+      data:[
+        attempt.score,
+        attempt.score + Math.round(attempt.wrong/2)*(cm+wm),
+        attempt.score + Math.round(attempt.wrong*0.75)*(cm+wm),
+        attempt.correct*cm,
+        attempt.score + attempt.skipped*cm
+      ],
+      backgroundColor:[
+        'rgba(91,79,207,0.9)',
+        'rgba(91,79,207,0.65)',
+        'rgba(91,79,207,0.45)',
+        'rgba(16,185,129,0.75)',
+        'rgba(249,115,22,0.75)'
+      ]
+    }]
+  },{scales:{y:{beginAtZero:false}},plugins:{legend:{display:false}}});
 }
 
 // ===================== AI ANALYSIS =====================
@@ -3285,4 +3688,4 @@ window.onload = function(){
 };
 </script>
 </body>
-</html>
+                                                                                    </html>
