@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
 :root {
   --primary: #5b4fcf;
@@ -1415,60 +1416,57 @@ function setExtractionStatus(msg, pct){
   if(f) f.style.width = Math.min(100, pct) + '%';
 }
 
-async function extractPDFText(file){
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-  let fullText = '';
-  const images = [];
-  for(let i=1; i<=pdf.numPages; i++){
-    setExtractionStatus('Reading page '+i+'/'+pdf.numPages+'...', Math.round((i/pdf.numPages)*14)+1);
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const pageText = content.items.map(s=>s.str).join(' ');
-    fullText += pageText + '\n\n';
-    const viewport = page.getViewport({scale:1.5});
-    const canvas = document.createElement('canvas');
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
-    images.push(canvas.toDataURL('image/jpeg',0.8));
-  }
-  return {text: fullText, images};
-}
-
+// Render PDF pages to images using PDF.js
 async function renderAllPDFPages(file){
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
   const pages = [];
   const total = pdf.numPages;
   for(let i=1; i<=total; i++){
-    setExtractionStatus('Rendering page '+i+'/'+total+'...', Math.round((i/total)*14)+1);
+    setExtractionStatus('Rendering page '+i+'/'+total+'...', Math.round((i/total)*12));
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({scale:2.0});
     const canvas = document.createElement('canvas');
     canvas.width = viewport.width;
     canvas.height = viewport.height;
     await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
-    pages.push(canvas.toDataURL('image/jpeg',0.85));
+    pages.push(canvas.toDataURL('image/jpeg',0.9));
   }
   return pages;
 }
 
+// Extract text from PDF using PDF.js (for text-based PDFs)
+async function extractPDFText(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  let fullText = '';
+  const images = [];
+  for(let i=1; i<=pdf.numPages; i++){
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    fullText += textContent.items.map(s=>s.str).join(' ') + '\n\n';
+    const viewport = page.getViewport({scale:1.5});
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+    images.push(canvas.toDataURL('image/jpeg',0.8));
+  }
+  return {text: fullText, images};
+}
+
+// Main extraction function
 async function extractAndCreate(){
   const name = document.getElementById('test-name-input').value || 'My Test';
   const file = APP.uploadedFiles.pdf;
   if(!file){ toast('Please upload a PDF or image first','error'); return; }
-
-  const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
-  if(!aiKey){ toast('Please add your API key in Settings first','error'); navigate('settings'); return; }
 
   document.getElementById('extraction-progress').style.display = 'block';
   document.getElementById('extract-btn').disabled = true;
   APP._pageImages = [];
 
   try{
-    // STEP 1: Render ALL pages to images (PDF.js — completely free)
-    setExtractionStatus('Rendering PDF pages...', 5);
+    // STEP 1: Render all pages to images
+    setExtractionStatus('Loading PDF pages...', 2);
     let pageImages = [];
 
     if(file.type === 'application/pdf'){
@@ -1482,231 +1480,371 @@ async function extractAndCreate(){
     if(!pageImages.length){ throw new Error('Could not load PDF pages.'); }
     APP._pageImages = pageImages;
 
-    // STEP 2: Try text extraction first (fast path for text PDFs)
-    setExtractionStatus('Checking for text content...', 15);
+    // STEP 2: Try PDF.js text extraction first (instant for text PDFs)
+    let pdfText = '';
+    if(file.type === 'application/pdf'){
+      setExtractionStatus('Checking for text layer...', 14);
+      const {text} = await extractPDFText(file);
+      pdfText = text.trim();
+    }
+
     let questions = [];
 
-    if(file.type === 'application/pdf'){
-      const {text} = await extractPDFText(file);
-      if(text && text.trim().length > 300){
-        setExtractionStatus('Text PDF detected — extracting questions...', 30);
-        questions = await extractFromTextWithDiagrams(text, pageImages, name);
+    if(pdfText.length > 500){
+      // TEXT PDF: Use AI on text only (1 call, very fast)
+      setExtractionStatus('Text PDF — extracting with AI...', 40);
+      const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
+      if(aiKey){
+        questions = await extractFromText_AI(pdfText, pageImages, name);
       }
     }
 
-    // STEP 3: If text failed or got < 3 questions → AI Vision page by page (auto, with smart delay)
+    // SCANNED PDF or text failed: Use Tesseract.js OCR (FREE, no API, no limit!)
     if(!questions || questions.length < 3){
-      setExtractionStatus('Processing pages with AI Vision...', 20);
-      questions = await extractFromPagesAuto(pageImages, name);
+      setExtractionStatus('Scanned PDF — using OCR (FREE, no API needed)...', 16);
+      questions = await extractFromPages_Tesseract(pageImages, name);
     }
 
     if(questions && questions.length > 0){
       APP.extractedQuestions = questions;
-      setExtractionStatus('Done! ' + questions.length + ' questions extracted ✓', 100);
+      
+      // Check if answer key was auto-detected
+      const hasKey = questions.some(q=>q.correctAnswer && q.correctAnswer !== '');
+      if(hasKey){
+        const keyCount = questions.filter(q=>q.correctAnswer && q.correctAnswer !== '').length;
+        toast('Done! '+questions.length+' questions + '+keyCount+' answers found!','success');
+      } else {
+        toast('Done! '+questions.length+' questions extracted. Add answer key after test.','success');
+      }
+
+      setExtractionStatus('Done! '+questions.length+' questions extracted.', 100);
       setTimeout(()=>document.getElementById('extraction-progress').style.display='none', 1000);
       showPreview(questions, name);
     } else {
-      throw new Error('No questions found. Please check your PDF.');
+      throw new Error('No questions found. Try a clearer PDF.');
     }
 
   } catch(err){
-    toast('Error: ' + err.message, 'error');
-    document.getElementById('extraction-progress').style.display = 'none';
+    toast('Error: '+err.message,'error');
+    document.getElementById('extraction-progress').style.display='none';
   }
   document.getElementById('extract-btn').disabled = false;
 }
 
-// renderAllPDFPages defined above
+// ── TESSERACT OCR EXTRACTION (100% FREE, no API, no limit) ──
+async function extractFromPages_Tesseract(pageImages, name){
+  const total = pageImages.length;
+  let allText = '';
+  const pageDiagrams = []; // store diagram images per page
 
-// Extract questions from text PDF — also attach diagrams from images
-async function extractFromTextWithDiagrams(text, pageImages, name){
-  const prompt = `You are a JEE/NEET exam question extractor. Extract ALL questions from this text.
-Return ONLY a valid JSON array. Each question object:
+  setExtractionStatus('Initializing OCR engine...', 16);
+
+  let worker;
+  try{
+    worker = await Tesseract.createWorker('eng', 1, {
+      logger: m => {
+        if(m.status === 'recognizing text'){
+          const pg = Math.round(m.progress * 100);
+        }
+      }
+    });
+  } catch(e){
+    // Tesseract failed - fall back to AI if key exists
+    const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
+    if(aiKey){
+      setExtractionStatus('OCR unavailable - using AI Vision...', 20);
+      return await extractFromPages_AI(pageImages, name);
+    }
+    throw new Error('OCR failed and no API key set. Please add API key in Settings.');
+  }
+
+  // OCR each page + detect diagrams
+  for(let i=0; i<total; i++){
+    const pct = Math.round(16 + (i/total)*50);
+    setExtractionStatus('OCR page '+(i+1)+'/'+total+'...', pct);
+
+    try{
+      const {data} = await worker.recognize(pageImages[i]);
+      allText += '--- PAGE '+(i+1)+' ---\n' + data.text + '\n\n';
+
+      // Detect if page has diagrams (check if text is sparse = diagram heavy page)
+      const textDensity = data.text.trim().length / 100;
+      const hasDiagram = await detectDiagramOnPage(pageImages[i], data.text);
+      pageDiagrams.push({ img: pageImages[i], hasDiagram, pageNum: i+1, textDensity });
+    } catch(e){
+      allText += '--- PAGE '+(i+1)+' ---\n[OCR failed]\n\n';
+      pageDiagrams.push({ img: pageImages[i], hasDiagram: false, pageNum: i+1 });
+    }
+  }
+
+  await worker.terminate();
+
+  // Parse questions from OCR text
+  setExtractionStatus('Parsing questions from OCR text...', 70);
+  const questions = await parseQuestionsFromOCR(allText, pageDiagrams, name);
+
+  return questions;
+}
+
+// Detect if a page has a diagram/figure/circuit/graph
+async function detectDiagramOnPage(imgSrc, ocrText){
+  // Heuristic: low text density OR text mentions "figure", "diagram", "circuit"
+  const textLower = ocrText.toLowerCase();
+  const diagramKeywords = ['fig.', 'figure', 'diagram', 'circuit', 'graph', 'shown below', 'shown above', 'following figure', 'given below'];
+  const hasKeyword = diagramKeywords.some(k => textLower.includes(k));
+  const isTextSparse = ocrText.trim().split('\n').filter(l=>l.trim().length>5).length < 8;
+  return hasKeyword || isTextSparse;
+}
+
+// Parse OCR text into structured questions + attach diagrams
+async function parseQuestionsFromOCR(fullText, pageDiagrams, name){
+  // Use AI to parse if available, else use regex parser
+  const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
+
+  let questions = [];
+
+  if(aiKey){
+    setExtractionStatus('AI parsing questions from OCR text...', 72);
+    // Send text only (no images) - very cheap, fast, no rate limit issues
+    questions = await parseWithAI_TextOnly(fullText, name);
+  } else {
+    setExtractionStatus('Parsing questions with pattern matching...', 72);
+    questions = parseWithRegex(fullText);
+  }
+
+  // Attach diagrams to questions
+  setExtractionStatus('Attaching diagrams to questions...', 88);
+  questions = attachDiagramsToQuestions(questions, pageDiagrams);
+
+  return questions;
+}
+
+// AI text-only parsing (no images = very fast, no rate limit)
+async function parseWithAI_TextOnly(ocrText, name){
+  const chunkSize = 10000;
+  let allQuestions = [];
+
+  // Process in chunks if text is long
+  const chunks = [];
+  for(let i=0; i<ocrText.length; i+=chunkSize){
+    chunks.push(ocrText.substring(i, i+chunkSize));
+  }
+
+  for(let c=0; c<chunks.length; c++){
+    setExtractionStatus('AI parsing chunk '+(c+1)+'/'+chunks.length+'...', 72 + Math.round((c/chunks.length)*14));
+    
+    const prompt = `You are a JEE/NEET question parser. This is OCR text extracted from an exam paper.
+Parse ALL questions and return ONLY a valid JSON array.
+
+Each question object:
+{
+  "subject": "Physics" or "Chemistry" or "Mathematics",
+  "topic": "chapter/topic name",
+  "type": "MCQ" or "INTEGER" or "MULTIPLE",
+  "question": "complete question text",
+  "options": [{"label":"A","text":"..."},{"label":"B","text":"..."},{"label":"C","text":"..."},{"label":"D","text":"..."}],
+  "correctAnswer": "A/B/C/D if answer key present in text, else empty string",
+  "difficulty": "Easy" or "Moderate" or "Hard",
+  "solution": "",
+  "pageRef": page number where this question appears (from PAGE markers in text)
+}
+
+RULES:
+- INTEGER type = student types number. options must be [].
+- MULTIPLE type = more than one option correct.
+- If answer key section found in text, extract correct answers.
+- pageRef = which page number the question is on.
+- Return ONLY JSON array, nothing else.
+
+OCR TEXT:
+${chunks[c]}`;
+
+    try{
+      const result = await callAI(prompt);
+      if(result){
+        const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+        const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
+        if(s!==-1 && e!==-1){
+          const parsed = JSON.parse(cleaned.substring(s,e+1));
+          allQuestions = allQuestions.concat(parsed);
+        }
+      }
+    } catch(err){ console.warn('Chunk '+c+' parse error:', err.message); }
+
+    // Small delay between chunks
+    if(c < chunks.length-1) await new Promise(r=>setTimeout(r,500));
+  }
+
+  // Deduplicate
+  const seen = new Set();
+  return allQuestions.filter(q=>{
+    const k=(q.question||'').substring(0,60).trim();
+    if(!k || seen.has(k)) return false;
+    seen.add(k); return true;
+  }).map((q,i)=>({...q, id:i+1}));
+}
+
+// Regex-based parser (fallback when no API key)
+function parseWithRegex(text){
+  const questions = [];
+  // Split by question numbers like "1.", "Q1.", "Q.1", "1)"
+  const qPattern = /(?:^|\n)\s*(?:Q\.?\s*)?(\d+)[.)]\s+(.+?)(?=\n\s*(?:Q\.?\s*)?\d+[.)]\s|\n\s*(?:A|B|C|D)[.)]\s|$)/gis;
+  const parts = text.split(/\n(?=\s*(?:Q\.?\s*)?\d+[.)]\s)/);
+
+  parts.forEach((part, i)=>{
+    if(!part.trim()) return;
+    const lines = part.trim().split('\n');
+    const questionLine = lines[0].replace(/^\s*(?:Q\.?\s*)?\d+[.)]\s*/, '').trim();
+    if(!questionLine || questionLine.length < 10) return;
+
+    const options = [];
+    const optPattern = /^\s*([A-D])[.)]\s*(.+)/;
+    let correctAnswer = '';
+    lines.slice(1).forEach(line=>{
+      const m = line.match(optPattern);
+      if(m) options.push({label:m[1], text:m[2].trim()});
+      // Check for answer
+      const ansM = line.match(/Ans(?:wer)?[\s:]+([A-D]|\d+)/i);
+      if(ansM) correctAnswer = ansM[1];
+    });
+
+    questions.push({
+      id: questions.length+1,
+      subject: 'Physics',
+      topic: 'Unknown',
+      type: options.length===0?'INTEGER':'MCQ',
+      question: questionLine,
+      options: options,
+      correctAnswer: correctAnswer,
+      difficulty: 'Moderate',
+      solution: '',
+      pageRef: 0
+    });
+  });
+
+  return questions;
+}
+
+// Attach diagram images to questions based on page reference
+function attachDiagramsToQuestions(questions, pageDiagrams){
+  return questions.map(q=>{
+    const pageRef = (q.pageRef || 1) - 1;
+    const pageData = pageDiagrams[pageRef] || pageDiagrams[0];
+
+    if(pageData && pageData.hasDiagram){
+      q.image = pageData.img;
+      q.hasDiagram = true;
+    }
+    return q;
+  });
+}
+
+// Text PDF with AI (fast, 1 call for text)
+async function extractFromText_AI(pdfText, pageImages, name){
+  const prompt = `You are a JEE/NEET question extractor. Extract ALL questions from this exam text.
+Return ONLY a valid JSON array. Each question:
 {
   "subject": "Physics" or "Chemistry" or "Mathematics",
   "topic": "chapter name",
   "type": "MCQ" or "INTEGER" or "MULTIPLE",
   "question": "full question text",
-  "options": [{"label":"A","text":"option text"}] for MCQ/MULTIPLE, [] for INTEGER,
-  "correctAnswer": "A" or number if visible else "",
+  "options": [{"label":"A","text":"..."}],
+  "correctAnswer": "A or number if visible in answer key else empty",
   "difficulty": "Easy" or "Moderate" or "Hard",
   "solution": "",
-  "hasDiagram": true or false,
-  "diagramPageHint": page number (1-based) if question has diagram else 0
+  "pageRef": page number (1-based)
 }
-INTEGER type = typing answer, no options needed.
-MULTIPLE = multiple correct MCQ.
-Return ONLY the JSON array, absolutely nothing else.
+INTEGER = no options, empty array [].
+If answer key section found, extract answers.
+Return ONLY JSON array.
 
-EXAM TEXT:
-${text.substring(0, 14000)}`;
+TEXT:
+${pdfText.substring(0,14000)}`;
 
   const result = await callAI(prompt);
   if(!result) return [];
   try{
     const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-    const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
+    const s=cleaned.indexOf('['), e=cleaned.lastIndexOf(']');
     if(s===-1||e===-1) return [];
     let questions = JSON.parse(cleaned.substring(s,e+1));
-
-    // For questions with diagrams, extract the diagram image from that page
-    for(let i=0; i<questions.length; i++){
-      if(questions[i].hasDiagram && questions[i].diagramPageHint > 0){
-        const pgIdx = questions[i].diagramPageHint - 1;
-        if(pageImages[pgIdx]) questions[i].image = pageImages[pgIdx];
-      }
-    }
-    return questions.map((q,i)=>({...q, id:i+1}));
+    // Attach diagrams
+    const pageDiagrams = pageImages.map((img,i)=>({img, hasDiagram:false, pageNum:i+1}));
+    questions = attachDiagramsToQuestions(questions, pageDiagrams);
+    return questions.map((q,i)=>({...q,id:i+1}));
   } catch(e){ return []; }
 }
 
-// Extract from scanned/image pages — one page at a time, auto rate limit handling
-async function extractFromPagesAuto(pageImages, name){
+// AI Vision fallback (when Tesseract fails)
+async function extractFromPages_AI(pageImages, name){
   let allQuestions = [];
   const total = pageImages.length;
 
   for(let i=0; i<total; i++){
-    const pct = Math.round(20 + (i/total)*75);
-    setExtractionStatus(`AI reading page ${i+1} of ${total}...`, pct);
+    const pct = Math.round(20 + (i/total)*70);
+    setExtractionStatus('AI Vision page '+(i+1)+'/'+total+'...', pct);
 
-    const prompt = `You are a JEE/NEET exam question extractor. Extract ALL questions visible on this exam paper page.
-Return ONLY a valid JSON array. Each question:
-{
-  "subject": "Physics" or "Chemistry" or "Mathematics",
-  "topic": "chapter/topic name",
-  "type": "MCQ" or "INTEGER" or "MULTIPLE",
-  "question": "complete question text (include all text, numbers, formulas)",
-  "options": [{"label":"A","text":"full option text"},{"label":"B","text":"..."},{"label":"C","text":"..."},{"label":"D","text":"..."}],
-  "correctAnswer": "A/B/C/D if answer key visible, else empty string",
-  "difficulty": "Easy" or "Moderate" or "Hard",
-  "solution": "",
-  "hasDiagram": true if question contains a figure/diagram/circuit/graph else false
-}
-IMPORTANT:
-- INTEGER type questions = student types a number. Set options to [] for these.
-- MULTIPLE type = more than one option correct.
-- If a question has a diagram/figure embedded in it, set hasDiagram to true.
-- If there is NO question on this page, return [].
-Return ONLY the JSON array.`;
+    const prompt = `Extract ALL JEE/NEET questions from this exam page.
+Return ONLY JSON array:
+[{"subject":"Physics/Chemistry/Mathematics","topic":"...","type":"MCQ/INTEGER/MULTIPLE","question":"...","options":[{"label":"A","text":"..."}],"correctAnswer":"","difficulty":"Moderate","solution":"","hasDiagram":false}]
+INTEGER type = empty options []. Return ONLY JSON.`;
 
-    let result = null;
     let retries = 0;
-
-    while(retries < 3){
+    while(retries < 2){
       try{
-        result = await callAIWithImage(prompt, pageImages[i]);
+        const result = await callAIWithImage(prompt, pageImages[i]);
+        if(result){
+          const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+          const s=cleaned.indexOf('['), e=cleaned.lastIndexOf(']');
+          if(s!==-1&&e!==-1){
+            let pageQs = JSON.parse(cleaned.substring(s,e+1));
+            pageQs = pageQs.map(q=>q.hasDiagram?{...q,image:pageImages[i]}:q);
+            allQuestions = allQuestions.concat(pageQs);
+          }
+        }
         break;
       } catch(err){
-        const isLimit = err.message && (err.message.includes('quota') || err.message.includes('429') || err.message.includes('limit') || err.message.includes('RESOURCE_EXHAUSTED'));
-        if(isLimit && retries < 2){
-          const waitSec = (retries + 1) * 20;
-          setExtractionStatus(`Rate limit — waiting ${waitSec}s... (page ${i+1}/${total})`, pct);
-          await new Promise(r=>setTimeout(r, waitSec * 1000));
+        const isLimit = err.message&&(err.message.includes('quota')||err.message.includes('429')||err.message.includes('RESOURCE_EXHAUSTED'));
+        if(isLimit && retries<1){
+          setExtractionStatus('Rate limit — waiting 20s... page '+(i+1)+'/'+total, pct);
+          await new Promise(r=>setTimeout(r,20000));
           retries++;
-        } else {
-          console.warn(`Page ${i+1} failed: ${err.message}`);
-          break;
-        }
+        } else { break; }
       }
     }
-
-    if(result){
-      try{
-        const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-        const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
-        if(s!==-1 && e!==-1){
-          let pageQs = JSON.parse(cleaned.substring(s,e+1));
-
-          // Attach the actual page image to questions that have diagrams
-          pageQs = pageQs.map(q => {
-            if(q.hasDiagram){
-              q.image = pageImages[i]; // Full page image for now
-            }
-            return q;
-          });
-
-          allQuestions = allQuestions.concat(pageQs);
-        }
-      } catch(e){ /* skip parse error */ }
-    }
-
-    // Smart delay between pages to avoid rate limits
-    if(i < total - 1){
-      await new Promise(r=>setTimeout(r, 2000)); // 2 sec gap
-    }
+    if(i<total-1) await new Promise(r=>setTimeout(r,1500));
   }
 
-  // Now for questions with diagrams, try to auto-crop the diagram region
-  allQuestions = await attachDiagramImages(allQuestions, pageImages);
-
-  // Deduplicate
   const seen = new Set();
   return allQuestions
-    .filter(q=>{ const k=(q.question||'').substring(0,70); if(seen.has(k))return false; seen.add(k); return true; })
-    .map((q,i)=>({...q, id:i+1}));
+    .filter(q=>{ const k=(q.question||'').substring(0,60); if(seen.has(k))return false; seen.add(k); return true; })
+    .map((q,i)=>({...q,id:i+1}));
 }
 
-// Try to extract just the diagram part from the page image using AI
-async function attachDiagramImages(questions, pageImages){
-  // For now attach full page image — diagram is visible within question context
-  // Advanced: could crop specific region but that requires coordinates from AI
-  return questions;
-}
-
-// AI call with a single image
+// AI call with image (for vision fallback)
 async function callAIWithImage(prompt, imgSrc){
   const gemKey = localStorage.getItem('gemini_key');
   const oaiKey = localStorage.getItem('openai_key');
-
   if(gemKey){
     const b64 = imgSrc.includes(',') ? imgSrc.split(',')[1] : imgSrc;
     const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${gemKey}`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        contents:[{parts:[
-          {text: prompt},
-          {inline_data:{mime_type:'image/jpeg', data: b64}}
-        ]}],
-        generationConfig:{temperature:0.1, maxOutputTokens:4096}
-      })
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:'image/jpeg',data:b64}}]}],generationConfig:{temperature:0.1,maxOutputTokens:4096}})
     });
     const data = await res.json();
-    if(data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+    return data.candidates?.[0]?.content?.parts?.[0]?.text||'';
   } else if(oaiKey){
-    const url = imgSrc.startsWith('data:') ? imgSrc : 'data:image/jpeg;base64,'+imgSrc;
+    const url = imgSrc.startsWith('data:')?imgSrc:'data:image/jpeg;base64,'+imgSrc;
     const res = await fetch('https://api.openai.com/v1/chat/completions',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+oaiKey},
-      body: JSON.stringify({
-        model:'gpt-4o-mini',
-        messages:[{role:'user',content:[
-          {type:'text',text:prompt},
-          {type:'image_url',image_url:{url, detail:'high'}}
-        ]}],
-        max_tokens:4096, temperature:0.1
-      })
+      method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+oaiKey},
+      body:JSON.stringify({model:'gpt-4o-mini',messages:[{role:'user',content:[{type:'text',text:prompt},{type:'image_url',image_url:{url,detail:'high'}}]}],max_tokens:4096,temperature:0.1})
     });
     const data = await res.json();
     if(data.error) throw new Error(data.error.message);
-    return data.choices?.[0]?.message?.content || '';
+    return data.choices?.[0]?.message?.content||'';
   }
   throw new Error('No API key configured');
-}
-
-// Extract from a single image file
-async function extractFromSingleImage(b64, name){
-  const prompt = `Extract ALL JEE/NEET questions from this exam image.
-Return ONLY JSON array: [{"subject":"Physics/Chemistry/Mathematics","topic":"...","type":"MCQ/INTEGER/MULTIPLE","question":"...","options":[{"label":"A","text":"..."}],"correctAnswer":"","difficulty":"Moderate","solution":"","hasDiagram":false}]
-INTEGER type = empty options []. Return ONLY JSON array.`;
-  try{
-    const result = await callAIWithImage(prompt, 'data:image/jpeg;base64,'+b64);
-    const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-    const s=cleaned.indexOf('['),e=cleaned.lastIndexOf(']');
-    if(s===-1||e===-1) return [];
-    return JSON.parse(cleaned.substring(s,e+1)).map((q,i)=>({...q,id:i+1}));
-  } catch(e){ return []; }
 }
 
 
@@ -2134,43 +2272,110 @@ function parseBulkKey(){
 async function processAnswerKeyFile(e){
   const file = e.target.files[0];
   if(!file) return;
-  document.getElementById('key-upload-status').textContent = '⏳ Extracting answers from file...';
-  
+  const statusEl = document.getElementById('key-upload-status');
+  statusEl.textContent = 'Reading answer key...';
+  statusEl.style.color = 'var(--text3)';
+
   try{
     let text = '';
+
     if(file.type === 'application/pdf'){
+      statusEl.textContent = 'Reading PDF answer key...';
       const {text:t} = await extractPDFText(file);
       text = t;
-    } else {
-      // Image - use AI vision
+    } else if(file.type.startsWith('image/')){
+      statusEl.textContent = 'Scanning answer key image (OCR)...';
       const reader = new FileReader();
-      reader.onload = async function(evt){
-        const b64 = evt.target.result.split(',')[1];
-        const prompt = `Extract the answer key from this image. Return ONLY a JSON object mapping question numbers to answers: {"1":"A","2":"B",...}`;
-        const result = await callAI(prompt+'[Image provided]');
-        if(result){
-          try{
-            const ans = JSON.parse(result.replace(/```json|```/g,'').trim());
-            APP.currentExam.answerKey = Object.fromEntries(Object.entries(ans).map(([k,v])=>[parseInt(k)-1,v]));
-            document.getElementById('key-upload-status').textContent = `✓ ${Object.keys(APP.currentExam.answerKey).length} answers extracted`;
-          }catch(e){ document.getElementById('key-upload-status').textContent = '✗ Could not parse'; }
+      const imgSrc = await new Promise(res=>{ reader.onload=ev=>res(ev.target.result); reader.readAsDataURL(file); });
+
+      try{
+        const worker = await Tesseract.createWorker('eng');
+        const {data} = await worker.recognize(imgSrc);
+        await worker.terminate();
+        text = data.text;
+        statusEl.textContent = 'OCR done, parsing answers...';
+      } catch(ocrErr){
+        statusEl.textContent = 'Using AI to read answer key image...';
+        const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
+        if(aiKey){
+          const prompt = 'Extract the answer key from this image. Return ONLY a JSON object: {"1":"A","2":"B","3":"C",...} where keys are question numbers and values are correct answers (A/B/C/D for MCQ or number for integer). Return ONLY the JSON object.';
+          const result = await callAIWithImage(prompt, imgSrc);
+          if(result){
+            const cleaned = result.replace(/```json|```/g,'').trim();
+            const s=cleaned.indexOf('{'), en=cleaned.lastIndexOf('}');
+            if(s!==-1 && en!==-1){
+              const ans = JSON.parse(cleaned.substring(s,en+1));
+              APP.currentExam.answerKey = Object.fromEntries(Object.entries(ans).map(([k,v])=>[parseInt(k)-1, String(v).toUpperCase()]));
+              const count = Object.keys(APP.currentExam.answerKey).length;
+              statusEl.textContent = count + ' answers extracted from image!';
+              statusEl.style.color = 'var(--accent2)';
+              return;
+            }
+          }
         }
-      };
-      reader.readAsDataURL(file);
-      return;
+        statusEl.textContent = 'OCR failed. Add API key or use manual entry.';
+        statusEl.style.color = 'var(--accent3)';
+        return;
+      }
     }
-    // Extract from text
-    const prompt = `From this answer key text, extract all question answers. Return ONLY JSON: {"1":"A","2":"B",...}\nText: ${text.substring(0,3000)}`;
-    const result = await callAI(prompt);
-    if(result){
-      const ans = JSON.parse(result.replace(/```json|```/g,'').trim());
-      APP.currentExam.answerKey = Object.fromEntries(Object.entries(ans).map(([k,v])=>[parseInt(k)-1,v]));
-      document.getElementById('key-upload-status').textContent = `✓ ${Object.keys(APP.currentExam.answerKey).length} answers extracted`;
+
+    if(text && text.trim().length > 3){
+      const parsed = parseAnswerKeyFromText(text);
+      if(Object.keys(parsed).length > 0){
+        APP.currentExam.answerKey = parsed;
+        statusEl.textContent = Object.keys(parsed).length + ' answers found!';
+        statusEl.style.color = 'var(--accent2)';
+        return;
+      }
+      // Regex failed - use AI text call (cheap, fast)
+      const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
+      if(aiKey){
+        statusEl.textContent = 'AI parsing answer key...';
+        const prompt = 'Extract the answer key from this text. Return ONLY JSON: {"1":"A","2":"B",...} where keys are question numbers. Return ONLY the JSON object.\n\nText:\n' + text.substring(0,4000);
+        const result = await callAI(prompt);
+        if(result){
+          const cleaned = result.replace(/```json|```/g,'').trim();
+          const s=cleaned.indexOf('{'), en=cleaned.lastIndexOf('}');
+          if(s!==-1 && en!==-1){
+            const ans = JSON.parse(cleaned.substring(s,en+1));
+            APP.currentExam.answerKey = Object.fromEntries(Object.entries(ans).map(([k,v])=>[parseInt(k)-1, String(v).toUpperCase()]));
+            statusEl.textContent = Object.keys(APP.currentExam.answerKey).length + ' answers extracted!';
+            statusEl.style.color = 'var(--accent2)';
+          }
+        }
+      } else {
+        statusEl.textContent = 'Could not auto-parse. Try manual entry below.';
+        statusEl.style.color = 'var(--accent3)';
+      }
     }
-  }catch(err){
-    document.getElementById('key-upload-status').textContent = '✗ Error: '+err.message;
+  } catch(err){
+    statusEl.textContent = 'Error: ' + err.message;
+    statusEl.style.color = 'var(--accent3)';
   }
 }
+
+function parseAnswerKeyFromText(text){
+  const ans = {};
+  let m;
+  const p1 = /(\d+)[.)]\s*([A-Da-d]|\d+(?:\.\d+)?)/g;
+  while((m=p1.exec(text))!==null){
+    ans[parseInt(m[1])-1] = m[2].toUpperCase();
+  }
+  if(Object.keys(ans).length === 0){
+    const p2 = /Q\.?\s*(\d+)\s*[-:]\s*([A-Da-d]|\d+)/gi;
+    while((m=p2.exec(text))!==null){
+      ans[parseInt(m[1])-1] = m[2].toUpperCase();
+    }
+  }
+  if(Object.keys(ans).length === 0){
+    const clean = text.replace(/\s+/g,'');
+    if(/^[ABCDabcd]{4,}$/.test(clean)){
+      clean.toUpperCase().split('').forEach((l,i)=>{ ans[i]=l; });
+    }
+  }
+  return ans;
+}
+
 
 function saveAnswerKey(){
   // From manual inputs
