@@ -556,18 +556,20 @@ tr:hover td{background:var(--bg3)}
           </div>
         </div>
       </div>
-      <!-- AI Auto-Extraction (replaces manual crop) -->
+      <!-- Crop Mode (100% FREE - no API needed) -->
       <div id="crop-mode" style="display:none;margin-top:22px">
         <div class="card">
-          <div class="card-title">🤖 AI Auto-Extracting Questions from Images</div>
-          <div class="card-subtitle">AI Vision is reading each page and extracting all questions — no manual cropping needed</div>
-          <div class="ai-extract-stages" id="ai-extract-stages">
-            <div class="ai-stage active" id="stage-render">⏳ Rendering PDF pages...</div>
-            <div class="ai-stage pending" id="stage-vision">🔍 AI Vision analyzing pages...</div>
-            <div class="ai-stage pending" id="stage-parse">📝 Parsing questions &amp; options...</div>
-            <div class="ai-stage pending" id="stage-done">✅ Done!</div>
+          <div class="section-head">
+            <div>
+              <div class="card-title">✂️ Crop Questions from PDF</div>
+              <div class="card-subtitle">Drag on any page to select a question — completely free, no API limit!</div>
+            </div>
+            <button class="btn btn-primary" onclick="finalizeCropMode()">✅ Done Cropping →</button>
           </div>
-          <div id="ai-extract-log" style="margin-top:12px;font-size:12px;color:var(--text3);max-height:140px;overflow-y:auto;background:var(--bg3);border-radius:var(--radius-sm);padding:10px;font-family:monospace"></div>
+          <div style="background:var(--primary-bg);border-radius:var(--radius-sm);padding:12px 16px;margin-bottom:16px;font-size:13px;color:var(--primary);font-weight:500">
+            💡 <strong>How to use:</strong> Drag on the image to crop a question area. Or tap "Add Whole Page" to add the whole page.
+          </div>
+          <div id="pdf-pages-container" style="display:flex;flex-direction:column;gap:8px"></div>
         </div>
       </div>
       <!-- Question Preview -->
@@ -1409,270 +1411,336 @@ async function extractAndCreate(){
   const name = document.getElementById('test-name-input').value || 'My Test';
   const file = APP.uploadedFiles.pdf;
   if(!file){ toast('Please upload a PDF or image first','error'); return; }
-  
+
   const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
-  if(!aiKey){ toast('Please add an API key in Settings first','error'); navigate('settings'); return; }
-  
+  if(!aiKey){ toast('Please add your API key in Settings first','error'); navigate('settings'); return; }
+
   document.getElementById('extraction-progress').style.display = 'block';
   document.getElementById('extract-btn').disabled = true;
-  
-  let text = '';
-  let images = [];
-  
+  APP._pageImages = [];
+
   try{
+    // STEP 1: Render ALL pages to images (PDF.js — completely free)
+    setExtractionStatus('Rendering PDF pages...', 5);
+    let pageImages = [];
+
     if(file.type === 'application/pdf'){
-      const result = await extractPDFText(file);
-      text = result.text;
-      images = result.images;
+      pageImages = await renderAllPDFPages(file);
     } else if(file.type.startsWith('image/')){
       const reader = new FileReader();
       const b64 = await new Promise(res=>{ reader.onload=e=>res(e.target.result); reader.readAsDataURL(file); });
-      images = [b64];
+      pageImages = [b64];
     }
-    
-    setExtractionStatus('Sending to AI for question extraction...', 60);
-    
+
+    if(!pageImages.length){ throw new Error('Could not load PDF pages.'); }
+    APP._pageImages = pageImages;
+
+    // STEP 2: Try text extraction first (fast path for text PDFs)
+    setExtractionStatus('Checking for text content...', 15);
     let questions = [];
-    
-    if(text && text.trim().length > 200){
-      questions = await extractQuestionsFromText(text, name);
+
+    if(file.type === 'application/pdf'){
+      const {text} = await extractPDFText(file);
+      if(text && text.trim().length > 300){
+        setExtractionStatus('Text PDF detected — extracting questions...', 30);
+        questions = await extractFromTextWithDiagrams(text, pageImages, name);
+      }
     }
-    
-    // If text extraction got few/no questions, use AI Vision automatically
-    if((!questions || questions.length < 3) && images.length > 0){
-      setExtractionStatus('Using AI Vision on images...', 65);
-      questions = await autoExtractFromImages(images, name);
+
+    // STEP 3: If text failed or got < 3 questions → AI Vision page by page (auto, with smart delay)
+    if(!questions || questions.length < 3){
+      setExtractionStatus('Processing pages with AI Vision...', 20);
+      questions = await extractFromPagesAuto(pageImages, name);
     }
-    
+
     if(questions && questions.length > 0){
       APP.extractedQuestions = questions;
-      setExtractionStatus('Done! '+questions.length+' questions extracted.', 100);
-      setTimeout(()=>{ document.getElementById('extraction-progress').style.display = 'none'; }, 1000);
+      setExtractionStatus('Done! ' + questions.length + ' questions extracted ✓', 100);
+      setTimeout(()=>document.getElementById('extraction-progress').style.display='none', 1000);
       showPreview(questions, name);
     } else {
-      throw new Error('No questions extracted. Check your API key or try a clearer PDF.');
+      throw new Error('No questions found. Please check your PDF.');
     }
-  }catch(err){
-    toast('Extraction failed: '+err.message,'error');
+
+  } catch(err){
+    toast('Error: ' + err.message, 'error');
     document.getElementById('extraction-progress').style.display = 'none';
   }
   document.getElementById('extract-btn').disabled = false;
 }
 
-// AUTO AI VISION EXTRACTION (replaces manual crop system)
-async function autoExtractFromImages(images, name){
-  document.getElementById('crop-mode').style.display = 'block';
-  const setStage = (id)=>{
-    ['stage-render','stage-vision','stage-parse','stage-done'].forEach(s=>{
-      const el = document.getElementById(s);
-      if(!el) return;
-      const isDone = el.className.includes('done');
-      el.className = 'ai-stage '+(s===id?'active':(isDone?'done':'pending'));
-    });
-  };
-  const markDone = (id)=>{ const el=document.getElementById(id); if(el) el.className='ai-stage done'; };
-  const addLog = (msg)=>{
-    const el=document.getElementById('ai-extract-log');
-    if(el){ el.innerHTML+=`<div>${msg}</div>`; el.scrollTop=el.scrollHeight; }
-  };
-  
-  setStage('stage-render');
-  markDone('stage-render');
-  addLog(`✓ ${images.length} page(s) loaded`);
-  setStage('stage-vision');
-  addLog('→ Sending to AI Vision...');
-  
-  let allQuestions = [];
-  const gemKey = localStorage.getItem('gemini_key');
-  const oaiKey = localStorage.getItem('openai_key');
-  const batchSize = 2;
-  
-  for(let i=0; i<images.length; i+=batchSize){
-    const batch = images.slice(i, i+batchSize);
-    addLog(`Processing pages ${i+1}–${Math.min(i+batchSize, images.length)}...`);
-    const prompt = `You are an expert JEE question extractor. These are pages from a JEE/NEET exam paper.
-Extract ALL questions visible on these pages. Return ONLY a valid JSON array.
-
-Each question object must have:
-- subject: "Physics", "Chemistry", or "Mathematics"
-- topic: chapter/topic name
-- type: "MCQ", "MULTIPLE", or "INTEGER"
-- question: full question text (preserve math as plain text)
-- options: array of {label:"A",text:"..."} for MCQ/MULTIPLE, empty array [] for INTEGER
-- correctAnswer: the correct option label (e.g. "A") or integer value if visible, else ""
-- difficulty: "Easy", "Moderate", or "Hard"
-- solution: "" unless visible on page
-
-Return ONLY the JSON array. No explanations or markdown.`;
-    
-    try{
-      let result = null;
-      if(gemKey){
-        const parts = [{text: prompt}];
-        for(const img of batch){
-          const b64 = img.includes(',') ? img.split(',')[1] : img;
-          parts.push({inline_data:{mime_type:'image/jpeg',data:b64}});
-        }
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${gemKey}`,{
-          method:'POST',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:0.1,maxOutputTokens:8192}})
-        });
-        const data = await res.json();
-        if(data.error) throw new Error(data.error.message);
-        result = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      } else if(oaiKey){
-        const msgContent = [{type:'text',text:prompt}];
-        for(const img of batch){
-          msgContent.push({type:'image_url',image_url:{url:img.startsWith('data:')?img:'data:image/jpeg;base64,'+img,detail:'high'}});
-        }
-        const res = await fetch('https://api.openai.com/v1/chat/completions',{
-          method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+oaiKey},
-          body:JSON.stringify({model:'gpt-4o',messages:[{role:'user',content:msgContent}],max_tokens:8000,temperature:0.1})
-        });
-        const data = await res.json();
-        if(data.error) throw new Error(data.error.message);
-        result = data.choices?.[0]?.message?.content || '';
-      }
-      if(result){
-        const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-        const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
-        if(s!==-1 && e!==-1){
-          const parsed = JSON.parse(cleaned.substring(s,e+1));
-          allQuestions = allQuestions.concat(parsed);
-          addLog(`✓ Found ${parsed.length} Qs on pages ${i+1}–${Math.min(i+batchSize,images.length)}`);
-        }
-      }
-    }catch(err){
-      addLog(`⚠ Pages ${i+1}–${Math.min(i+batchSize,images.length)}: ${err.message}`);
-    }
-  }
-  
-  markDone('stage-vision');
-  setStage('stage-parse');
-  
-  // Deduplicate by question text
-  const deduped = [];
-  const seen = new Set();
-  allQuestions.forEach((q,i)=>{
-    const key = (q.question||'').substring(0,80);
-    if(!seen.has(key)){ seen.add(key); deduped.push({...q, id:deduped.length+1}); }
-  });
-  
-  addLog(`✓ ${deduped.length} unique questions extracted total`);
-  markDone('stage-parse');
-  setStage('stage-done');
-  markDone('stage-done');
-  setTimeout(()=>{ document.getElementById('crop-mode').style.display='none'; }, 1800);
-  return deduped;
-}
-
-async function extractPDFText(file){
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-  let fullText = '';
-  const images = [];
-  
-  for(let i=1; i<=pdf.numPages; i++){
-    setExtractionStatus(`Extracting page ${i}/${pdf.numPages}...`, (i/pdf.numPages)*50);
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const pageText = content.items.map(s=>s.str).join(' ');
-    fullText += pageText + '\n\n';
-    
-    // Also render to canvas for image fallback
-    const viewport = page.getViewport({scale:1.5});
-    const canvas = document.createElement('canvas');
-    canvas.width = viewport.width; canvas.height = viewport.height;
-    await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
-    images.push(canvas.toDataURL('image/jpeg',0.8));
-  }
-  return {text: fullText, images};
-}
-
-async function renderPDFPages(file){
+// Render ALL pages of PDF to base64 images
+async function renderAllPDFPages(file){
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
   const pages = [];
-  for(let i=1; i<=pdf.numPages; i++){
+  const total = pdf.numPages;
+
+  for(let i=1; i<=total; i++){
+    setExtractionStatus(`Rendering page ${i}/${total}...`, Math.round((i/total)*14)+1);
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({scale:2});
+    const viewport = page.getViewport({scale: 2.0}); // High quality
     const canvas = document.createElement('canvas');
-    canvas.width = viewport.width; canvas.height = viewport.height;
-    await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
-    pages.push(canvas.toDataURL());
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({canvasContext: ctx, viewport}).promise;
+    pages.push(canvas.toDataURL('image/jpeg', 0.85));
   }
   return pages;
 }
 
-function setExtractionStatus(msg, pct){
-  document.getElementById('extraction-status').textContent = msg;
-  document.getElementById('extraction-fill').style.width = pct+'%';
+// Extract questions from text PDF — also attach diagrams from images
+async function extractFromTextWithDiagrams(text, pageImages, name){
+  const prompt = `You are a JEE/NEET exam question extractor. Extract ALL questions from this text.
+Return ONLY a valid JSON array. Each question object:
+{
+  "subject": "Physics" or "Chemistry" or "Mathematics",
+  "topic": "chapter name",
+  "type": "MCQ" or "INTEGER" or "MULTIPLE",
+  "question": "full question text",
+  "options": [{"label":"A","text":"option text"}] for MCQ/MULTIPLE, [] for INTEGER,
+  "correctAnswer": "A" or number if visible else "",
+  "difficulty": "Easy" or "Moderate" or "Hard",
+  "solution": "",
+  "hasDiagram": true or false,
+  "diagramPageHint": page number (1-based) if question has diagram else 0
 }
+INTEGER type = typing answer, no options needed.
+MULTIPLE = multiple correct MCQ.
+Return ONLY the JSON array, absolutely nothing else.
 
-async function extractQuestionsFromText(text, testName){
-  const prompt = `You are an expert JEE question extractor. Extract all questions from the following text and return ONLY a valid JSON array.
-
-Rules:
-- Each question must have: id, subject (Physics/Chemistry/Mathematics), topic, type (MCQ/MULTIPLE/INTEGER), question (text), options (array of {label,text} for MCQ/MULTIPLE), correctAnswer (option label like "A" or number for integer, or array for MULTIPLE), difficulty (Easy/Moderate/Hard), solution (if present)
-- If answer key is embedded in the text, extract it
-- For INTEGER type, correctAnswer is the integer value
-- Detect subject from question content
-- Return ONLY the JSON array, no explanation
-
-Text:
-${text.substring(0,12000)}
-
-Return format: [{"id":1,"subject":"Physics","topic":"Kinematics","type":"MCQ","question":"...","options":[{"label":"A","text":"..."},...],"correctAnswer":"B","difficulty":"Moderate","solution":""}]`;
+EXAM TEXT:
+${text.substring(0, 14000)}`;
 
   const result = await callAI(prompt);
   if(!result) return [];
-  
   try{
     const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
-    const start = cleaned.indexOf('[');
-    const end = cleaned.lastIndexOf(']');
-    if(start===-1||end===-1) return [];
-    return JSON.parse(cleaned.substring(start,end+1));
-  }catch(e){
-    console.error('Parse error:',e);
-    return [];
-  }
+    const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
+    if(s===-1||e===-1) return [];
+    let questions = JSON.parse(cleaned.substring(s,e+1));
+
+    // For questions with diagrams, extract the diagram image from that page
+    for(let i=0; i<questions.length; i++){
+      if(questions[i].hasDiagram && questions[i].diagramPageHint > 0){
+        const pgIdx = questions[i].diagramPageHint - 1;
+        if(pageImages[pgIdx]) questions[i].image = pageImages[pgIdx];
+      }
+    }
+    return questions.map((q,i)=>({...q, id:i+1}));
+  } catch(e){ return []; }
 }
 
-// Manual crop mode removed — replaced by AI auto-extraction (autoExtractFromImages)
+// Extract from scanned/image pages — one page at a time, auto rate limit handling
+async function extractFromPagesAuto(pageImages, name){
+  let allQuestions = [];
+  const total = pageImages.length;
+
+  for(let i=0; i<total; i++){
+    const pct = Math.round(20 + (i/total)*75);
+    setExtractionStatus(`AI reading page ${i+1} of ${total}...`, pct);
+
+    const prompt = `You are a JEE/NEET exam question extractor. Extract ALL questions visible on this exam paper page.
+Return ONLY a valid JSON array. Each question:
+{
+  "subject": "Physics" or "Chemistry" or "Mathematics",
+  "topic": "chapter/topic name",
+  "type": "MCQ" or "INTEGER" or "MULTIPLE",
+  "question": "complete question text (include all text, numbers, formulas)",
+  "options": [{"label":"A","text":"full option text"},{"label":"B","text":"..."},{"label":"C","text":"..."},{"label":"D","text":"..."}],
+  "correctAnswer": "A/B/C/D if answer key visible, else empty string",
+  "difficulty": "Easy" or "Moderate" or "Hard",
+  "solution": "",
+  "hasDiagram": true if question contains a figure/diagram/circuit/graph else false
+}
+IMPORTANT:
+- INTEGER type questions = student types a number. Set options to [] for these.
+- MULTIPLE type = more than one option correct.
+- If a question has a diagram/figure embedded in it, set hasDiagram to true.
+- If there is NO question on this page, return [].
+Return ONLY the JSON array.`;
+
+    let result = null;
+    let retries = 0;
+
+    while(retries < 3){
+      try{
+        result = await callAIWithImage(prompt, pageImages[i]);
+        break;
+      } catch(err){
+        const isLimit = err.message && (err.message.includes('quota') || err.message.includes('429') || err.message.includes('limit') || err.message.includes('RESOURCE_EXHAUSTED'));
+        if(isLimit && retries < 2){
+          const waitSec = (retries + 1) * 20;
+          setExtractionStatus(`Rate limit — waiting ${waitSec}s... (page ${i+1}/${total})`, pct);
+          await new Promise(r=>setTimeout(r, waitSec * 1000));
+          retries++;
+        } else {
+          console.warn(`Page ${i+1} failed: ${err.message}`);
+          break;
+        }
+      }
+    }
+
+    if(result){
+      try{
+        const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+        const s = cleaned.indexOf('['), e = cleaned.lastIndexOf(']');
+        if(s!==-1 && e!==-1){
+          let pageQs = JSON.parse(cleaned.substring(s,e+1));
+
+          // Attach the actual page image to questions that have diagrams
+          pageQs = pageQs.map(q => {
+            if(q.hasDiagram){
+              q.image = pageImages[i]; // Full page image for now
+            }
+            return q;
+          });
+
+          allQuestions = allQuestions.concat(pageQs);
+        }
+      } catch(e){ /* skip parse error */ }
+    }
+
+    // Smart delay between pages to avoid rate limits
+    if(i < total - 1){
+      await new Promise(r=>setTimeout(r, 2000)); // 2 sec gap
+    }
+  }
+
+  // Now for questions with diagrams, try to auto-crop the diagram region
+  allQuestions = await attachDiagramImages(allQuestions, pageImages);
+
+  // Deduplicate
+  const seen = new Set();
+  return allQuestions
+    .filter(q=>{ const k=(q.question||'').substring(0,70); if(seen.has(k))return false; seen.add(k); return true; })
+    .map((q,i)=>({...q, id:i+1}));
+}
+
+// Try to extract just the diagram part from the page image using AI
+async function attachDiagramImages(questions, pageImages){
+  // For now attach full page image — diagram is visible within question context
+  // Advanced: could crop specific region but that requires coordinates from AI
+  return questions;
+}
+
+// AI call with a single image
+async function callAIWithImage(prompt, imgSrc){
+  const gemKey = localStorage.getItem('gemini_key');
+  const oaiKey = localStorage.getItem('openai_key');
+
+  if(gemKey){
+    const b64 = imgSrc.includes(',') ? imgSrc.split(',')[1] : imgSrc;
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-2.0-flash:generateContent?key=${gemKey}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        contents:[{parts:[
+          {text: prompt},
+          {inline_data:{mime_type:'image/jpeg', data: b64}}
+        ]}],
+        generationConfig:{temperature:0.1, maxOutputTokens:4096}
+      })
+    });
+    const data = await res.json();
+    if(data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  } else if(oaiKey){
+    const url = imgSrc.startsWith('data:') ? imgSrc : 'data:image/jpeg;base64,'+imgSrc;
+    const res = await fetch('https://api.openai.com/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+oaiKey},
+      body: JSON.stringify({
+        model:'gpt-4o-mini',
+        messages:[{role:'user',content:[
+          {type:'text',text:prompt},
+          {type:'image_url',image_url:{url, detail:'high'}}
+        ]}],
+        max_tokens:4096, temperature:0.1
+      })
+    });
+    const data = await res.json();
+    if(data.error) throw new Error(data.error.message);
+    return data.choices?.[0]?.message?.content || '';
+  }
+  throw new Error('No API key configured');
+}
+
+// Extract from a single image file
+async function extractFromSingleImage(b64, name){
+  const prompt = `Extract ALL JEE/NEET questions from this exam image.
+Return ONLY JSON array: [{"subject":"Physics/Chemistry/Mathematics","topic":"...","type":"MCQ/INTEGER/MULTIPLE","question":"...","options":[{"label":"A","text":"..."}],"correctAnswer":"","difficulty":"Moderate","solution":"","hasDiagram":false}]
+INTEGER type = empty options []. Return ONLY JSON array.`;
+  try{
+    const result = await callAIWithImage(prompt, 'data:image/jpeg;base64,'+b64);
+    const cleaned = result.replace(/```json\n?/g,'').replace(/```\n?/g,'').trim();
+    const s=cleaned.indexOf('['),e=cleaned.lastIndexOf(']');
+    if(s===-1||e===-1) return [];
+    return JSON.parse(cleaned.substring(s,e+1)).map((q,i)=>({...q,id:i+1}));
+  } catch(e){ return []; }
+}
+
 
 // ===================== PREVIEW =====================
 function showPreview(questions, name){
   document.getElementById('extracted-preview').style.display = 'block';
-  document.getElementById('preview-title').textContent = `📋 ${name}`;
-  document.getElementById('preview-count').textContent = `${questions.length} questions extracted`;
+  document.getElementById('preview-title').textContent = name + ' — Preview';
+  document.getElementById('preview-count').textContent = questions.length + ' questions extracted';
   
   const list = document.getElementById('preview-list');
-  const subjects = [...new Set(questions.map(q=>q.subject))];
+  const subjects = [...new Set(questions.map(q=>q.subject||'Unknown'))];
+  const withDiagrams = questions.filter(q=>q.image||q.hasDiagram).length;
+  const numerical = questions.filter(q=>q.type==='INTEGER').length;
   
-  list.innerHTML = `
-    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px">
-      ${subjects.map(s=>`<div class="badge badge-purple">${s}: ${questions.filter(q=>q.subject===s).length}q</div>`).join('')}
-    </div>
-    <div style="max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:12px">
-      ${questions.slice(0,10).map((q,i)=>`
-        <div style="border:1.5px solid var(--border);border-radius:var(--radius-sm);padding:14px">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-            <span style="font-weight:700;font-size:12.5px">Q${i+1}</span>
-            <span class="badge badge-purple">${q.subject}</span>
-            <span class="badge badge-gray">${q.type}</span>
-            <span class="${q.difficulty==='Easy'?'diff-easy':q.difficulty==='Hard'?'diff-hard':'diff-mod'}">${q.difficulty}</span>
-          </div>
-          ${q.image?`<img src="${q.image}" style="max-width:300px;border-radius:4px;margin-bottom:8px">`:'' }
-          <div style="font-size:13px;color:var(--text);margin-bottom:8px">${q.question}</div>
-          ${q.options?`<div style="display:flex;flex-wrap:wrap;gap:6px">${q.options.map(o=>`<div style="font-size:12px;padding:3px 8px;border:1px solid var(--border);border-radius:4px">${o.label}. ${o.text}</div>`).join('')}</div>`:''}
-          ${q.correctAnswer?`<div style="margin-top:6px;font-size:12px;color:var(--accent2);font-weight:600">✓ Answer: ${q.correctAnswer}</div>`:''}
-        </div>
-      `).join('')}
-      ${questions.length>10?`<div style="text-align:center;color:var(--text3);font-size:13px;padding:10px">...and ${questions.length-10} more questions</div>`:''}
-    </div>
-  `;
+  let html = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">';
+  subjects.forEach(s=>{
+    html += '<div class="badge badge-purple">'+s+': '+questions.filter(q=>q.subject===s).length+'</div>';
+  });
+  if(withDiagrams) html += '<div class="badge badge-green">'+withDiagrams+' with diagrams</div>';
+  if(numerical) html += '<div class="badge badge-orange">'+numerical+' numerical type</div>';
+  html += '</div>';
+  html += '<div style="max-height:500px;overflow-y:auto;display:flex;flex-direction:column;gap:12px">';
+  
+  questions.forEach(function(q,i){
+    var typeLabel = q.type==='INTEGER'?'Numerical':q.type==='MULTIPLE'?'Multi Correct':'MCQ';
+    var typeBadge = q.type==='INTEGER'?'badge-orange':q.type==='MULTIPLE'?'badge-purple':'badge-gray';
+    var diffClass = q.difficulty==='Easy'?'diff-easy':q.difficulty==='Hard'?'diff-hard':'diff-mod';
+    html += '<div style="border:1.5px solid var(--border);border-radius:var(--radius-sm);padding:14px;background:var(--bg2)">';
+    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">';
+    html += '<span style="font-weight:800;font-size:13px;color:var(--primary)">Q'+(i+1)+'</span>';
+    html += '<span class="badge badge-purple">'+(q.subject||'Physics')+'</span>';
+    html += '<span class="badge '+typeBadge+'">'+typeLabel+'</span>';
+    html += '<span class="'+diffClass+'">'+(q.difficulty||'Moderate')+'</span>';
+    if(q.hasDiagram||q.image) html += '<span class="badge badge-green">Has Diagram</span>';
+    html += '</div>';
+    if(q.image){
+      html += '<img src="'+q.image+'" style="max-width:100%;max-height:200px;object-fit:contain;border-radius:6px;margin-bottom:10px;border:1px solid var(--border)" onerror="this.style.display=\'none\'">';
+    }
+    if(q.question){
+      var qtext = q.question.substring(0,300)+(q.question.length>300?'...':'');
+      html += '<div style="font-size:13px;line-height:1.6;margin-bottom:8px">'+qtext+'</div>';
+    }
+    if(q.type==='INTEGER'){
+      html += '<div style="font-size:12px;color:#ea580c;font-weight:600;background:#fff7ed;padding:6px 10px;border-radius:6px;display:inline-block">Typing answer (numerical)</div>';
+    }
+    if(q.options && q.options.length){
+      html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">';
+      q.options.forEach(function(o){
+        html += '<div style="font-size:12px;padding:3px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg3)">'+o.label+'. '+(o.text||'').substring(0,60)+'</div>';
+      });
+      html += '</div>';
+    }
+    if(q.correctAnswer){
+      html += '<div style="margin-top:6px;font-size:12px;color:var(--accent2);font-weight:700">Ans: '+q.correctAnswer+'</div>';
+    }
+    html += '</div>';
+  });
+  
+  html += '</div>';
+  list.innerHTML = html;
 }
+
 
 // ===================== SAVE & START TEST =====================
 function saveAndStartTest(){
@@ -1786,37 +1854,75 @@ function renderCurrentQuestion(){
   if(activeTab) activeTab.classList.add('active');
   
   const totalQues = APP.currentExam.questions.length;
+  const typeLabel = q.type==='INTEGER'?'Numerical':q.type==='MULTIPLE'?'Multi Correct':'Single Correct';
+  const typeBadgeColor = q.type==='INTEGER'?'badge-orange':q.type==='MULTIPLE'?'badge-purple':'badge-gray';
   
   box.innerHTML = `
     <div class="que-meta">
       <span class="que-num">Q${idx+1} of ${totalQues}</span>
-      <span class="badge badge-purple">${q.subject}</span>
+      <span class="badge badge-purple">${q.subject||'Physics'}</span>
       ${q.topic?`<span class="badge badge-gray">${q.topic}</span>`:''}
+      <span class="badge ${typeBadgeColor}">${typeLabel}</span>
       <span class="${q.difficulty==='Easy'?'diff-easy':q.difficulty==='Hard'?'diff-hard':'diff-mod'}">${q.difficulty||'Moderate'}</span>
-      <span class="badge ${resp.status==='answered'?'badge-green':resp.status==='marked'||resp.status==='marked-answered'?'badge-purple':'badge-gray'}">${resp.status.replace('-',' ')}</span>
     </div>
-    ${q.image?`<div class="que-image-wrap"><img src="${q.image}" alt="Question diagram" onclick="zoomImage('${q.image}')"></div>`:''}
-    <div class="que-text">${formatMath(q.question)}</div>
+    
+    ${q.image ? `
+      <div class="que-image-wrap" style="margin:12px 0">
+        <img src="${q.image}" alt="Question" style="max-width:100%;border-radius:8px;cursor:zoom-in;border:1.5px solid var(--border)" 
+          onclick="zoomImage(this.src)" onerror="this.style.display='none'">
+        ${q.hasDiagram?'<div style="font-size:11px;color:var(--text3);margin-top:4px;text-align:center">📊 Diagram included above</div>':''}
+      </div>
+    ` : ''}
+    
+    ${q.question && q.question.trim() ? `<div class="que-text" style="margin:10px 0">${formatMath(q.question)}</div>` : ''}
+    
     ${renderOptions(q, resp)}
-    <div style="margin-top:14px;font-size:11.5px;color:var(--text3)">Time on this question: <span class="per-q-timer" id="inline-per-q">${formatTime(resp.timeSpent)}</span></div>
+    
+    <div style="margin-top:16px;display:flex;align-items:center;gap:14px;font-size:11.5px;color:var(--text3)">
+      <span>⏱ <span id="inline-per-q">${formatTime(resp.timeSpent)}</span></span>
+      <span class="badge ${resp.status==='answered'?'badge-green':resp.status==='marked'||resp.status==='marked-answered'?'badge-purple':'badge-gray'}" style="font-size:10.5px">${resp.status.replace(/-/g,' ')}</span>
+    </div>
   `;
 }
 
 function renderOptions(q, resp){
-  if(q.type==='INTEGER'){
-    return `<div style="margin-top:12px">
-      <label style="font-size:13px;font-weight:600;color:var(--text2);display:block;margin-bottom:8px">Enter your answer (integer):</label>
-      <input class="integer-input" type="number" id="integer-ans" value="${resp.answer||''}" onchange="selectIntegerAnswer(this.value)" placeholder="Enter integer...">
-    </div>`;
+  // INTEGER / Numerical type — show typing input
+  if(q.type==='INTEGER' || !q.options || !q.options.length){
+    const isNum = q.type==='INTEGER' || q.type==='NUMERICAL';
+    return `
+      <div style="margin-top:14px">
+        <div style="font-size:12.5px;font-weight:700;color:var(--text2);margin-bottom:10px;display:flex;align-items:center;gap:8px">
+          <span style="background:#fff7ed;color:#ea580c;padding:3px 10px;border-radius:20px;font-size:11px">✏️ Type your answer</span>
+          ${isNum?'<span style="font-size:11px;color:var(--text3)">Enter numerical value</span>':''}
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <input class="integer-input" 
+            type="${isNum?'number':'text'}" 
+            id="integer-ans" 
+            value="${resp.answer||''}" 
+            oninput="selectIntegerAnswer(this.value)"
+            placeholder="${isNum?'Enter number...':'Type answer...'}"
+            style="font-size:18px;font-weight:700;width:200px;padding:12px 16px;border:2px solid var(--border);border-radius:var(--radius-sm);font-family:'DM Mono',monospace;outline:none"
+            onfocus="this.style.borderColor='var(--primary)'"
+            onblur="this.style.borderColor='var(--border)'">
+          ${resp.answer ? `<span style="color:var(--accent2);font-weight:700;font-size:14px">✓ Answer: ${resp.answer}</span>` : ''}
+        </div>
+        <div style="margin-top:8px;font-size:11.5px;color:var(--text3)">💡 Marks: +${APP.currentExam.config?.correctMarks||4} correct, −${APP.currentExam.config?.wrongMarks||0} wrong</div>
+      </div>`;
   }
-  if(!q.options || !q.options.length) return '';
-  return `<div class="options-list">
-    ${q.options.map(opt=>`
-      <div class="option-item ${resp.answer===opt.label||(Array.isArray(resp.answer)&&resp.answer.includes(opt.label))?'selected':''}" onclick="selectAnswer('${opt.label}',${q.type==='MULTIPLE'})">
-        <div class="option-label">${opt.label}</div>
-        <div style="flex:1">${formatMath(opt.text)}</div>
-      </div>
-    `).join('')}
+  
+  // MCQ / MULTIPLE type — show options
+  return `<div class="options-list" style="margin-top:12px">
+    ${q.options.map(opt=>{
+      const isSelected = resp.answer===opt.label || (Array.isArray(resp.answer) && resp.answer.includes(opt.label));
+      return `
+        <div class="option-item ${isSelected?'selected':''}" onclick="selectAnswer('${opt.label}',${q.type==='MULTIPLE'})">
+          <div class="option-label" style="min-width:26px;height:26px">${opt.label}</div>
+          <div style="flex:1;line-height:1.6">${formatMath(opt.text||'')}</div>
+          ${isSelected ? '<span style="color:var(--primary);font-size:16px;margin-left:6px">✓</span>' : ''}
+        </div>`;
+    }).join('')}
+    ${q.type==='MULTIPLE'?'<div style="font-size:11.5px;color:var(--text3);margin-top:8px">💡 Multiple options may be correct — select all that apply</div>':''}
   </div>`;
 }
 
