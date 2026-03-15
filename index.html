@@ -1525,7 +1525,7 @@ function selectExtractionMode(mode){
     hint.textContent='🤖 Auto mode — OCR + AI parses questions. API key needed.';
   } else {
     hint.style.background='#f0fdf4'; hint.style.color='#16a34a';
-    hint.textContent='✂️ Smart Crop — Detects question boundaries automatically using PDF structure. 100% FREE, no API, unlimited pages!';
+    hint.textContent='✂️ Smart Crop — Works on ALL PDFs including scanned. Detects questions visually. 100% FREE, no API!';
   }
   const btn = document.getElementById('start-extraction-btn');
   btn.style.display='flex';
@@ -1534,16 +1534,20 @@ function selectExtractionMode(mode){
 
 async function startSelectedExtraction(){
   document.getElementById('extraction-mode-selector').style.display='none';
-  if(APP_extractionMode==='crop'){
-    await startJSSmartCrop();
-  } else {
-    await extractAndCreate();
-  }
+  if(APP_extractionMode==='crop') await startJSSmartCrop();
+  else await extractAndCreate();
 }
 
-// ===================== JS SMART CROP (0 API calls, 100% FREE) =====================
-// Uses PDF.js text positions to find question boundaries
-// Then renders pages as images and crops each question region
+// ===================== SMART CROP V4 — WORKS ON ALL PDFs =====================
+// Fully automatic. Zero API calls. Zero OCR. Pure JavaScript + Canvas.
+// Works even when there are NO question numbers (like QFT23).
+//
+// How it works:
+// 1. Render each page as image
+// 2. Pixel analysis: scan each row's darkness
+// 3. Find "white valleys" = gaps between questions
+// 4. Crop each section between gaps
+// 5. Filter out tiny/header sections
 
 async function startJSSmartCrop(){
   const file = APP.uploadedFiles.pdf;
@@ -1553,86 +1557,27 @@ async function startJSSmartCrop(){
   document.getElementById('extraction-progress').style.display = 'block';
 
   try{
-    setExtractionStatus('Reading PDF structure...', 5);
-
     const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+    const pdf = await pdfjsLib.getDocument({data:arrayBuffer}).promise;
     const totalPages = pdf.numPages;
 
-    setExtractionStatus('Analyzing text positions on all pages...', 10);
+    // First try text-based detection
+    setExtractionStatus('Checking PDF type...', 5);
+    let questions = await tryTextBasedDetection(pdf, totalPages);
 
-    // Step 1: Extract text with positions from ALL pages
-    const allPageData = [];
-    for(let p=1; p<=totalPages; p++){
-      const pct = Math.round(10 + (p/totalPages)*30);
-      setExtractionStatus('Reading page '+p+'/'+totalPages+'...', pct);
-      const pageData = await extractPageTextWithPositions(pdf, p);
-      allPageData.push(pageData);
+    // If text failed (scanned PDF) → visual pixel analysis
+    if(questions.length < 3){
+      setExtractionStatus('Scanned PDF — using visual analysis...', 10);
+      questions = await visualDetectionAllPages(pdf, totalPages);
     }
 
-    // Step 2: Find question boundaries using text positions
-    setExtractionStatus('Detecting question boundaries...', 42);
-    const questionRegions = detectQuestionRegions(allPageData);
+    if(!questions.length) throw new Error('No questions detected. Try Auto Extract mode.');
 
-    if(questionRegions.length === 0){
-      throw new Error('No question patterns found. Try Auto Extract mode.');
-    }
-
-    setExtractionStatus('Found '+questionRegions.length+' questions. Rendering pages...', 45);
-
-    // Step 3: Render pages as high-quality images
-    const pageImages = {};
-    const uniquePages = [...new Set(questionRegions.map(r=>r.pageIndex))];
-    for(let i=0; i<uniquePages.length; i++){
-      const pgIdx = uniquePages[i];
-      const pct = Math.round(45 + (i/uniquePages.length)*35);
-      setExtractionStatus('Rendering page '+(pgIdx+1)+'...', pct);
-      pageImages[pgIdx] = await renderSinglePage(pdf, pgIdx+1);
-    }
-
-    // Step 4: Crop each question from its page image
-    setExtractionStatus('Cropping question images...', 82);
-    const questions = [];
-    for(let i=0; i<questionRegions.length; i++){
-      const region = questionRegions[i];
-      const pageImg = pageImages[region.pageIndex];
-      if(!pageImg) continue;
-      try{
-        const croppedImg = await cropImageByPercent(
-          pageImg,
-          region.xPct,
-          region.yPct,
-          region.wPct,
-          region.hPct
-        );
-        questions.push({
-          id: i+1,
-          image: croppedImg,
-          pageIdx: region.pageIndex,
-          subject: region.subject || 'Physics',
-          topic: 'Unknown',
-          type: region.type || 'MCQ',
-          question: 'Q'+(region.questionNum)+' (Page '+(region.pageIndex+1)+')',
-          options: region.type !== 'INTEGER'
-            ? [{label:'A',text:'A'},{label:'B',text:'B'},{label:'C',text:'C'},{label:'D',text:'D'}]
-            : [],
-          correctAnswer: region.correctAnswer || '',
-          difficulty: 'Moderate',
-          hasDiagram: true,
-          solution: ''
-        });
-      } catch(e){ /* skip bad crops */ }
-    }
-
-    if(!questions.length) throw new Error('Could not crop any questions. Try Auto Extract mode.');
-
-    setExtractionStatus('Done! '+questions.length+' questions cropped.', 100);
+    setExtractionStatus('Done! '+questions.length+' questions extracted.', 100);
     setTimeout(()=>document.getElementById('extraction-progress').style.display='none', 800);
-
     APP.extractedQuestions = questions;
-    const name = document.getElementById('test-name-input').value || 'My Test';
-    showPreview(questions, name);
-    toast(questions.length+' questions auto-cropped! 100% FREE ✓','success');
+    showPreview(questions, document.getElementById('test-name-input').value||'My Test');
+    toast(questions.length+' questions auto-cropped! ✓','success');
 
   } catch(err){
     toast('Error: '+err.message,'error');
@@ -1641,209 +1586,242 @@ async function startJSSmartCrop(){
   document.getElementById('extract-btn').disabled = false;
 }
 
-// Extract text items with their Y positions from a PDF page
-async function extractPageTextWithPositions(pdf, pageNum){
-  const page = await pdf.getPage(pageNum);
-  const viewport = page.getViewport({scale:1.0});
-  const textContent = await page.getTextContent();
+// ── APPROACH 1: Text-based (for PDFs with selectable text) ──
+async function tryTextBasedDetection(pdf, totalPages){
+  const allPageData = [];
+  for(let p=1; p<=totalPages; p++){
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({scale:1.0});
+    const tc = await page.getTextContent();
+    const items = tc.items.map(item=>{
+      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+      return { text:item.str.trim(), x:tx[4], y:viewport.height-tx[5], pageH:viewport.height, pageW:viewport.width };
+    }).filter(i=>i.text.length>0);
+    allPageData.push({pageIndex:p-1, items, pageH:viewport.height, pageW:viewport.width});
+  }
 
-  const items = textContent.items.map(item=>{
-    const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-    return {
-      text: item.str,
-      x: tx[4],                          // x position in points
-      y: viewport.height - tx[5],        // y from TOP (PDF y is from bottom)
-      width: item.width,
-      height: item.height,
-      fontSize: Math.abs(item.transform[0])
-    };
-  }).filter(item => item.text.trim().length > 0);
+  const hasText = allPageData.some(p=>p.items.length > 8);
+  if(!hasText) return [];
 
-  return {
-    pageNum,
-    pageIndex: pageNum-1,
-    pageWidth: viewport.width,
-    pageHeight: viewport.height,
-    items
-  };
-}
-
-// Detect question start positions using text patterns
-function detectQuestionRegions(allPageData){
-  const regions = [];
-
-  // Question number patterns:
-  // "Q.1", "Q1.", "Q. 1", "1.", "1)", "Q1", "(1)", "Ques.1"
-  const Q_PATTERN = /^(?:Q\.?\s*|Ques(?:tion)?\.?\s*)?(\d{1,3})[.)]\s*$/i;
-  const Q_INLINE  = /^(?:Q\.?\s*|Ques(?:tion)?\.?\s*)(\d{1,3})\b/i;
-
-  // Collect all question start points across all pages
-  const allStarts = [];
-
-  for(const pageData of allPageData){
-    const {items, pageIndex, pageHeight, pageWidth} = pageData;
-
-    for(let i=0; i<items.length; i++){
-      const item = items[i];
-      const txt = item.text.trim();
-
-      let qNum = null;
-
-      // Try standalone number like "1." or "Q.1"
-      const m1 = txt.match(Q_PATTERN);
-      if(m1) qNum = parseInt(m1[1]);
-
-      // Try inline "Q1 text..." — first word is Q+number
-      if(!qNum){
-        const m2 = txt.match(Q_INLINE);
-        if(m2) qNum = parseInt(m2[1]);
-      }
-
-      // Validate: question numbers should be 1-150, and font should be reasonable
-      if(qNum && qNum >= 1 && qNum <= 150){
-        // Extra check: make sure it's not a sub-item (should be leftish on page)
-        const xPct = (item.x / pageWidth) * 100;
-        if(xPct < 25){ // question numbers are usually in left 25% of page
-          allStarts.push({
-            pageIndex,
-            pageHeight,
-            pageWidth,
-            questionNum: qNum,
-            yPos: item.y,        // y in points from top
-            xPos: item.x,
-            items: pageData.items // reference to page items
-          });
+  // Find question starts by pattern
+  const Q_PAT = /^(?:Q\.?\s*)?(\d{1,3})[.)]/i;
+  const starts = [];
+  for(const pd of allPageData){
+    for(const item of pd.items){
+      const m = item.text.match(Q_PAT);
+      if(m){
+        const qNum = parseInt(m[1]);
+        if(qNum>=1 && qNum<=200 && (item.x/pd.pageW)*100 < 25){
+          starts.push({...item, pageIndex:pd.pageIndex, qNum, pageH:pd.pageH, pageW:pd.pageW, allItems:pd.items});
         }
       }
     }
   }
+  if(starts.length < 3) return [];
 
-  // Sort by page then by y position
-  allStarts.sort((a,b)=> a.pageIndex!==b.pageIndex
-    ? a.pageIndex-b.pageIndex
-    : a.yPos-b.yPos
-  );
+  starts.sort((a,b)=>a.pageIndex!==b.pageIndex?a.pageIndex-b.pageIndex:a.y-b.y);
+  const seen=new Set();
+  const unique=starts.filter(s=>{const k=s.pageIndex+'-'+s.qNum;if(seen.has(k))return false;seen.add(k);return true;});
 
-  // Remove duplicates (same question number on same page, keep topmost)
-  const seen = new Set();
-  const uniqueStarts = allStarts.filter(s=>{
-    const key = s.pageIndex+'-'+s.questionNum;
-    if(seen.has(key)) return false;
-    seen.add(key); return true;
-  });
-
-  // Build regions: from question start to next question start (or page end)
-  for(let i=0; i<uniqueStarts.length; i++){
-    const curr = uniqueStarts[i];
-    const next = uniqueStarts[i+1];
-
-    // Top Y: a bit above the question number (5% padding)
-    const topPadding = curr.pageHeight * 0.012;
-    const topY = Math.max(0, curr.yPos - topPadding);
-
-    let bottomY;
-    if(next && next.pageIndex === curr.pageIndex){
-      // Next question is on same page — end just before it
-      bottomY = next.yPos - (curr.pageHeight * 0.008);
-    } else {
-      // Last question on page — go to 97% of page height
-      bottomY = curr.pageHeight * 0.97;
-    }
-
-    // Detect question type from nearby text
-    let type = 'MCQ';
-    let correctAnswer = '';
-    const pageItems = curr.items;
-    const regionItems = pageItems.filter(item=>
-      item.y >= topY && item.y <= bottomY
-    );
-    const regionText = regionItems.map(i=>i.text).join(' ').toLowerCase();
-
-    if(regionText.includes('integer') || regionText.includes('numerical') ||
-       regionText.includes('type-2') || regionText.includes('section b')){
-      type = 'INTEGER';
-    } else if(regionText.includes('multiple') || regionText.includes('more than one')){
-      type = 'MULTIPLE';
-    }
-
-    // Look for answer key in text (e.g. "Ans: A" or "Answer: B")
-    const ansMatch = regionText.match(/ans(?:wer)?[:\s]+([a-d]|\d+)/i);
-    if(ansMatch) correctAnswer = ansMatch[1].toUpperCase();
-
-    // Detect subject from keywords
-    let subject = 'Physics';
-    const physicsKw = ['velocity','force','current','voltage','circuit','magnetic','electric','motion','energy','wave','optics'];
-    const chemKw = ['mole','reaction','compound','element','acid','base','organic','bond','atom','solution','equilibrium'];
-    const mathKw = ['function','matrix','determinant','integral','limit','derivative','vector','probability','sequence','series'];
-    const countKw = (kws)=> kws.filter(k=>regionText.includes(k)).length;
-    const pScore=countKw(physicsKw), cScore=countKw(chemKw), mScore=countKw(mathKw);
-    if(mScore>pScore && mScore>cScore) subject='Mathematics';
-    else if(cScore>pScore) subject='Chemistry';
-
-    // Convert y positions to percentages
-    const yPct = (topY / curr.pageHeight) * 100;
-    const hPct = ((bottomY - topY) / curr.pageHeight) * 100;
-    const xPct = 1; // start from 1% (include left margin)
-    const wPct = 98; // go to 99% (include right margin)
-
-    regions.push({
-      pageIndex: curr.pageIndex,
-      questionNum: curr.questionNum,
-      yPct: Math.max(0, yPct),
-      xPct,
-      wPct,
-      hPct: Math.min(100-yPct, Math.max(5, hPct)),
-      type,
-      subject,
-      correctAnswer
-    });
+  const regions=[];
+  for(let i=0;i<unique.length;i++){
+    const curr=unique[i], next=unique[i+1];
+    const topY=Math.max(0,curr.y-curr.pageH*0.012);
+    const botY=(next&&next.pageIndex===curr.pageIndex)?next.y-curr.pageH*0.008:curr.pageH*0.97;
+    regions.push({pageIndex:curr.pageIndex,qNum:curr.qNum,
+      yPct:(topY/curr.pageH)*100,xPct:1,wPct:98,
+      hPct:Math.min(100-(topY/curr.pageH)*100,Math.max(5,((botY-topY)/curr.pageH)*100))});
   }
 
-  return regions;
+  // Render and crop
+  return await renderAndCropRegions(pdf, regions);
 }
 
-// Render a single PDF page to a high-quality image
-async function renderSinglePage(pdf, pageNum){
-  const page = await pdf.getPage(pageNum);
-  const viewport = page.getViewport({scale:2.5}); // High quality for crisp crops
-  const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  await page.render({canvasContext:canvas.getContext('2d'), viewport}).promise;
-  return canvas.toDataURL('image/jpeg', 0.95);
+// ── APPROACH 2: Visual pixel analysis (for scanned PDFs, no Q numbers needed) ──
+async function visualDetectionAllPages(pdf, totalPages){
+  const allRegions = [];
+  let qNum = 1;
+
+  for(let p=1; p<=totalPages; p++){
+    const pct = Math.round(10+(p/totalPages)*55);
+    setExtractionStatus('Scanning page '+p+'/'+totalPages+'...', pct);
+
+    const page = await pdf.getPage(p);
+
+    // Render at medium resolution for analysis
+    const analysisVP = page.getViewport({scale:1.2});
+    const aC = document.createElement('canvas');
+    aC.width=analysisVP.width; aC.height=analysisVP.height;
+    await page.render({canvasContext:aC.getContext('2d'), viewport:analysisVP}).promise;
+
+    const splits = findSplitPoints(aC);
+
+    // Build regions from split points
+    const pageSections = buildSections(splits, p-1, qNum);
+    qNum += pageSections.length;
+    allRegions.push(...pageSections);
+  }
+
+  if(!allRegions.length) return [];
+
+  setExtractionStatus('Rendering high-quality crops...', 67);
+  return await renderAndCropRegions(pdf, allRegions);
+}
+
+// Find horizontal split points using pixel row analysis
+function findSplitPoints(canvas){
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const imageData = ctx.getImageData(0, 0, W, H).data;
+
+  // Skip left 5% and right 5% (margins)
+  const xStart = Math.floor(W * 0.05);
+  const xEnd   = Math.floor(W * 0.95);
+  const xRange = xEnd - xStart;
+
+  // Row darkness: fraction of non-white pixels per row
+  const rowDark = new Float32Array(H);
+  for(let y=0; y<H; y++){
+    let dark=0;
+    for(let x=xStart; x<xEnd; x++){
+      const i=(y*W+x)*4;
+      if((imageData[i]+imageData[i+1]+imageData[i+2])/3 < 230) dark++;
+    }
+    rowDark[y] = dark/xRange;
+  }
+
+  // Smooth over 4 rows
+  const smooth = new Float32Array(H);
+  for(let y=0;y<H;y++){
+    let s=0,c=0;
+    for(let d=-2;d<=2;d++){if(y+d>=0&&y+d<H){s+=rowDark[y+d];c++;}}
+    smooth[y]=s/c;
+  }
+
+  // Detect white-space gaps (consecutive rows below threshold)
+  const WHITE_THRESH = 0.015; // < 1.5% dark = white row
+  const MIN_GAP = 6;          // at least 6 consecutive white rows
+
+  const splits = [];
+  let gapStart=-1;
+
+  for(let y=0;y<H;y++){
+    if(smooth[y]<WHITE_THRESH){
+      if(gapStart<0) gapStart=y;
+    } else {
+      if(gapStart>=0){
+        const len=y-gapStart;
+        if(len>=MIN_GAP){
+          const midPct=((gapStart+len/2)/H)*100;
+          if(midPct>4 && midPct<96) splits.push(midPct);
+        }
+        gapStart=-1;
+      }
+    }
+  }
+  return splits;
+}
+
+// Build question section regions from split points
+function buildSections(splits, pageIndex, startQNum){
+  const sections = [];
+  const allPoints = [0, ...splits, 100];
+
+  for(let i=0; i<allPoints.length-1; i++){
+    const yStart = allPoints[i];
+    const yEnd   = allPoints[i+1];
+    const height = yEnd - yStart;
+
+    // Skip very thin sections (less than 5% of page = likely just a line/header)
+    if(height < 5) continue;
+
+    sections.push({
+      pageIndex,
+      qNum: startQNum + sections.length,
+      yPct: yStart,
+      xPct: 1,
+      wPct: 98,
+      hPct: height
+    });
+  }
+  return sections;
+}
+
+// Render pages at high quality and crop all regions
+async function renderAndCropRegions(pdf, regions){
+  const pageCache = {};
+  const questions = [];
+
+  // Pre-render all unique pages needed
+  const uniquePages = [...new Set(regions.map(r=>r.pageIndex))];
+  for(let i=0;i<uniquePages.length;i++){
+    const pgIdx = uniquePages[i];
+    const pct = Math.round(67+(i/uniquePages.length)*28);
+    setExtractionStatus('High-res render page '+(pgIdx+1)+'...', pct);
+    const page = await pdf.getPage(pgIdx+1);
+    const vp = page.getViewport({scale:2.5}); // high quality
+    const c = document.createElement('canvas');
+    c.width=vp.width; c.height=vp.height;
+    await page.render({canvasContext:c.getContext('2d'), viewport:vp}).promise;
+    pageCache[pgIdx] = c.toDataURL('image/jpeg', 0.95);
+  }
+
+  // Crop each region
+  for(let i=0;i<regions.length;i++){
+    const r = regions[i];
+    const pageImg = pageCache[r.pageIndex];
+    if(!pageImg) continue;
+    try{
+      const cropped = await cropImageByPercent(pageImg, r.xPct, r.yPct, r.wPct, r.hPct);
+      questions.push({
+        id: i+1,
+        image: cropped,
+        pageIdx: r.pageIndex,
+        subject: 'Physics',
+        topic: 'Unknown',
+        type: 'MCQ',
+        question: 'Q'+(r.qNum)+' (Page '+(r.pageIndex+1)+')',
+        options: [{label:'A',text:'A'},{label:'B',text:'B'},{label:'C',text:'C'},{label:'D',text:'D'}],
+        correctAnswer: r.correctAnswer||'',
+        difficulty: 'Moderate',
+        hasDiagram: true,
+        solution: ''
+      });
+    } catch(e){}
+  }
+  return questions;
 }
 
 // Crop image by percentage coordinates
 function cropImageByPercent(imgSrc, xPct, yPct, wPct, hPct){
-  return new Promise((resolve, reject)=>{
-    const img = new Image();
-    img.onload = ()=>{
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>{
       try{
-        const W = img.naturalWidth, H = img.naturalHeight;
-        const x = Math.max(0, (xPct/100)*W);
-        const y = Math.max(0, (yPct/100)*H);
-        const w = Math.min(W-x, (wPct/100)*W);
-        const h = Math.min(H-y, (hPct/100)*H);
-        if(w<20||h<20){ reject(new Error('Too small')); return; }
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(w);
-        canvas.height = Math.round(h);
-        canvas.getContext('2d').drawImage(img, x, y, w, h, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.95));
-      } catch(e){ reject(e); }
+        const W=img.naturalWidth,H=img.naturalHeight;
+        const x=Math.max(0,(xPct/100)*W);
+        const y=Math.max(0,(yPct/100)*H);
+        const w=Math.min(W-x,(wPct/100)*W);
+        const h=Math.min(H-y,(hPct/100)*H);
+        if(w<20||h<20){reject(new Error('Too small'));return;}
+        const c=document.createElement('canvas');
+        c.width=Math.round(w); c.height=Math.round(h);
+        c.getContext('2d').drawImage(img,x,y,w,h,0,0,w,h);
+        resolve(c.toDataURL('image/jpeg',0.95));
+      } catch(e){reject(e);}
     };
-    img.onerror = ()=>reject(new Error('Load failed'));
-    img.src = imgSrc;
+    img.onerror=()=>reject(new Error('Load failed'));
+    img.src=imgSrc;
   });
 }
 
 // Stubs for HTML compatibility
-let CROP = {pages:[],currentPage:0,questions:[]};
+let CROP={pages:[],currentPage:0,questions:[]};
 async function startSmartCropMode(){ await startJSSmartCrop(); }
-function cropGoToPage(i){ CROP.currentPage=i; }
-function cropPrevPage(){ if(CROP.currentPage>0) cropGoToPage(CROP.currentPage-1); }
-function cropNextPage(){ if(CROP.currentPage<CROP.pages.length-1) cropGoToPage(CROP.currentPage+1); }
-function closeSmartCrop(){ document.getElementById('smart-crop-container').classList.remove('open'); }
+function cropGoToPage(i){CROP.currentPage=i;}
+function cropPrevPage(){if(CROP.currentPage>0)cropGoToPage(CROP.currentPage-1);}
+function cropNextPage(){if(CROP.currentPage<CROP.pages.length-1)cropGoToPage(CROP.currentPage+1);}
+function closeSmartCrop(){document.getElementById('smart-crop-container').classList.remove('open');}
 function finishSmartCrop(){
   if(!CROP.questions.length){toast('No questions!','error');return;}
   APP.extractedQuestions=CROP.questions.map((q,i)=>({...q,id:i+1}));
