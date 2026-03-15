@@ -306,6 +306,31 @@ tr:hover td{background:var(--bg3)}
 .qj-wrong{background:#fef2f2;color:#dc2626;border:1.5px solid #fca5a5}
 .qj-skip{background:var(--bg3);color:var(--text3);border:1.5px solid var(--border)}
 .qj-marked{background:#ede9fe;color:#7c3aed;border:1.5px solid #a78bfa}
+/* ===== EXTRACTION MODE CARDS ===== */
+#mode-auto-card:hover,#mode-auto-card.selected{border-color:var(--primary)!important;background:var(--primary-bg)}
+#mode-crop-card:hover,#mode-crop-card.selected{border-color:var(--accent2)!important;background:#f0fdf4}
+/* ===== SMART CROP FULL SCREEN ===== */
+#smart-crop-container{position:fixed;inset:0;background:#1a1a2e;z-index:700;display:none;flex-direction:column}
+#smart-crop-container.open{display:flex}
+.crop-topbar{background:#16213e;border-bottom:2px solid #0f3460;padding:0 16px;height:54px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.crop-title{font-size:14px;font-weight:700;color:#fff;flex:1}
+.crop-counter{font-size:12px;color:#a0aec0;background:#0f3460;padding:4px 12px;border-radius:20px}
+.crop-layout{display:flex;flex:1;overflow:hidden}
+.crop-pages-strip{width:88px;background:#0f3460;overflow-y:auto;flex-shrink:0;display:flex;flex-direction:column;gap:6px;padding:8px}
+.crop-page-thumb{width:72px;height:96px;object-fit:cover;border-radius:5px;cursor:pointer;border:2.5px solid transparent;transition:all .15s}
+.crop-page-thumb.active{border-color:#e94560}
+.crop-page-thumb.done{border-color:#48bb78}
+.crop-main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.crop-viewer{flex:1;overflow:auto;display:flex;justify-content:center;align-items:flex-start;padding:16px;background:#1a1a2e}
+.crop-img-wrap{position:relative;display:inline-block;cursor:crosshair;user-select:none;touch-action:none;-webkit-user-select:none}
+.crop-img-wrap img{display:block;max-width:100%;border-radius:6px;pointer-events:none}
+.crop-sel{position:absolute;border:2.5px solid #e94560;background:rgba(233,69,96,0.12);pointer-events:none;border-radius:3px;display:none}
+.crop-bottom{background:#16213e;border-top:2px solid #0f3460;flex-shrink:0}
+.crop-toolbar{padding:10px 14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.crop-chips{padding:6px 14px 10px;display:flex;flex-wrap:wrap;gap:6px;max-height:100px;overflow-y:auto}
+.crop-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;background:#0f3460;color:#a0aec0;border-radius:16px;font-size:11px;border:1.5px solid #1a3a5c;cursor:pointer}
+.crop-chip img{height:26px;border-radius:3px}
+.crop-chip:hover{border-color:#e94560;color:#e94560}
 .ai-extract-stages{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .ai-stage{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:8px 12px;border-radius:var(--radius-sm);background:var(--bg3)}
 .ai-stage.done{background:#f0fdf4;color:#16a34a}
@@ -469,9 +494,43 @@ tr:hover td{background:var(--bg3)}
       <div class="section-head">
         <div>
           <div class="section-title">➕ Create New Test</div>
-          <div class="section-sub">Upload PDF, image, or video — AI will extract questions automatically</div>
+          <div class="section-sub">Choose extraction mode after uploading your PDF</div>
         </div>
       </div>
+
+      <!-- EXTRACTION MODE SELECTOR (shown after PDF upload) -->
+      <div id="extraction-mode-selector" style="display:none;margin-bottom:22px">
+        <div class="card" style="border:2px solid var(--primary)">
+          <div class="card-title" style="margin-bottom:4px">⚡ Choose Extraction Mode</div>
+          <div class="card-subtitle" style="margin-bottom:16px">How do you want to extract questions from this PDF?</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+
+            <div id="mode-auto-card" onclick="selectExtractionMode('auto')" style="border:2.5px solid var(--border);border-radius:var(--radius);padding:18px;cursor:pointer;transition:all .2s;position:relative">
+              <div style="font-size:28px;margin-bottom:8px">🤖</div>
+              <div style="font-weight:800;font-size:14px;margin-bottom:6px">Auto Extract</div>
+              <div style="font-size:12px;color:var(--text3);line-height:1.5">OCR + AI parse questions automatically. Diagrams auto-attached. Needs API key for text parsing.</div>
+              <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--accent2)">✓ Works on any PDF</div>
+              <div style="font-size:11px;color:var(--text3)">~2-5 min for 75 pages</div>
+            </div>
+
+            <div id="mode-crop-card" onclick="selectExtractionMode('crop')" style="border:2.5px solid var(--border);border-radius:var(--radius);padding:18px;cursor:pointer;transition:all .2s;position:relative">
+              <div style="font-size:28px;margin-bottom:8px">✂️</div>
+              <div style="font-weight:800;font-size:14px;margin-bottom:6px">Smart Crop</div>
+              <div style="font-size:12px;color:var(--text3);line-height:1.5">PDF pages shown as images. Draw boxes around each question — question image saved directly. No AI needed!</div>
+              <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--accent2)">✓ 100% FREE, no API</div>
+              <div style="font-size:11px;color:var(--text3)">~1-2 min, diagrams included</div>
+            </div>
+
+          </div>
+          <div id="selected-mode-hint" style="margin-top:14px;padding:10px 14px;border-radius:var(--radius-sm);display:none;font-size:12.5px;font-weight:600"></div>
+          <div style="margin-top:14px;display:flex;gap:10px">
+            <button class="btn btn-primary" id="start-extraction-btn" onclick="startSelectedExtraction()" style="display:none;flex:1">
+              Start Extraction →
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="grid grid-2">
         <div class="card">
           <div class="card-title">📂 Upload Source</div>
@@ -549,7 +608,7 @@ tr:hover td{background:var(--bg3)}
             <div style="margin-top:6px;font-size:11.5px;color:var(--primary);cursor:pointer" id="api-key-link" onclick="openApiKeyLink()">🔗 Get your free API key here →</div>
           </div>
           <div style="display:flex;gap:10px">
-            <button class="btn btn-primary" onclick="extractAndCreate()" id="extract-btn" style="flex:1">
+            <button class="btn btn-primary" onclick="showExtractionModeSelector()" id="extract-btn" style="flex:1">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
               Extract & Create
             </button>
@@ -841,6 +900,44 @@ tr:hover td{background:var(--bg3)}
 
   </div><!-- end #content -->
 </div><!-- end #main -->
+
+<!-- ============ SMART CROP MODE ============ -->
+<div id="smart-crop-container">
+  <div class="crop-topbar">
+    <div class="crop-title">✂️ Smart Crop Mode</div>
+    <div class="crop-counter" id="crop-page-counter">Page 1/1</div>
+    <div class="crop-counter" id="crop-q-counter" style="background:#1a3a2e;color:#48bb78">0 questions</div>
+    <button style="background:#e94560;color:#fff;border:none;padding:8px 18px;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;margin-left:8px" onclick="finishSmartCrop()">✅ Done</button>
+    <button style="background:#2d3748;color:#a0aec0;border:none;padding:8px 14px;border-radius:8px;font-size:13px;cursor:pointer" onclick="closeSmartCrop()">✕ Cancel</button>
+  </div>
+  <div class="crop-layout">
+    <!-- Left: Page thumbnails strip -->
+    <div class="crop-pages-strip" id="crop-pages-strip"></div>
+    <!-- Right: Main viewer + toolbar -->
+    <div class="crop-main">
+      <div style="background:#0f3460;padding:8px 14px;font-size:12px;color:#a0aec0;flex-shrink:0">
+        👆 <strong style="color:#fff">Drag</strong> on the page to crop a question. Each crop = one question. Diagram included automatically!
+      </div>
+      <div class="crop-viewer" id="crop-viewer">
+        <div class="crop-img-wrap" id="crop-img-wrap">
+          <img id="crop-main-img" src="" alt="PDF page">
+          <div class="crop-sel" id="crop-sel"></div>
+        </div>
+      </div>
+      <div class="crop-bottom">
+        <div class="crop-toolbar">
+          <button class="btn btn-sm" style="background:#2d3748;color:#fff;border:none" onclick="cropPrevPage()">← Prev</button>
+          <button class="btn btn-sm" style="background:#2d3748;color:#fff;border:none" onclick="cropNextPage()">Next →</button>
+          <button class="btn btn-sm" style="background:#1a3a2e;color:#48bb78;border:1.5px solid #48bb78" onclick="addFullPageAsQuestion()">+ Add Full Page</button>
+          <button class="btn btn-sm" style="background:#2d3748;color:#a0aec0;border:none" onclick="undoLastCrop()">↩ Undo</button>
+          <div style="flex:1"></div>
+          <span style="font-size:12px;color:#a0aec0" id="crop-page-label">Page 1</span>
+        </div>
+        <div class="crop-chips" id="crop-chips"></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- ============ EXAM ENGINE ============ -->
 <div id="exam-container">
@@ -1406,6 +1503,287 @@ async function callAI(prompt, provider='gemini'){
     return null;
   }
 }
+
+// ===================== EXTRACTION MODE SELECTOR =====================
+let APP_extractionMode = 'auto'; // 'auto' or 'crop'
+
+function showExtractionModeSelector(){
+  const file = APP.uploadedFiles.pdf;
+  if(!file){ toast('Please upload a PDF or image first','error'); return; }
+  document.getElementById('extraction-mode-selector').style.display = 'block';
+  document.getElementById('extraction-mode-selector').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function selectExtractionMode(mode){
+  APP_extractionMode = mode;
+  // Update card styles
+  document.getElementById('mode-auto-card').classList.toggle('selected', mode==='auto');
+  document.getElementById('mode-crop-card').classList.toggle('selected', mode==='crop');
+  // Show hint
+  const hint = document.getElementById('selected-mode-hint');
+  hint.style.display = 'block';
+  if(mode === 'auto'){
+    hint.style.background = 'var(--primary-bg)';
+    hint.style.color = 'var(--primary)';
+    hint.textContent = '🤖 Auto mode selected — OCR will extract text, AI will parse questions. API key needed for text parsing.';
+  } else {
+    hint.style.background = '#f0fdf4';
+    hint.style.color = '#16a34a';
+    hint.textContent = '✂️ Smart Crop selected — You draw boxes around questions. 100% FREE, diagrams included automatically!';
+  }
+  // Show start button
+  const btn = document.getElementById('start-extraction-btn');
+  btn.style.display = 'flex';
+  btn.textContent = mode==='auto' ? '🤖 Start Auto Extraction →' : '✂️ Start Smart Crop →';
+}
+
+async function startSelectedExtraction(){
+  document.getElementById('extraction-mode-selector').style.display = 'none';
+  if(APP_extractionMode === 'crop'){
+    await startSmartCropMode();
+  } else {
+    await extractAndCreate();
+  }
+}
+
+// ===================== SMART CROP MODE =====================
+let CROP = {
+  pages: [],         // base64 page images
+  currentPage: 0,
+  questions: [],     // [{image, pageIdx}]
+  isDragging: false,
+  startX: 0, startY: 0,
+  imgNaturalW: 0, imgNaturalH: 0
+};
+
+async function startSmartCropMode(){
+  const file = APP.uploadedFiles.pdf;
+  if(!file){ toast('Upload a PDF first','error'); return; }
+
+  toast('Loading PDF pages...','info');
+  document.getElementById('extract-btn').disabled = true;
+
+  try{
+    // Render all pages
+    const pages = await renderAllPDFPages(file);
+    CROP.pages = pages;
+    CROP.currentPage = 0;
+    CROP.questions = [];
+
+    // Build thumbnail strip
+    const strip = document.getElementById('crop-pages-strip');
+    strip.innerHTML = '';
+    pages.forEach((src, i)=>{
+      const img = document.createElement('img');
+      img.src = src;
+      img.className = 'crop-page-thumb' + (i===0?' active':'');
+      img.id = 'crop-thumb-'+i;
+      img.title = 'Page '+(i+1);
+      img.onclick = ()=> cropGoToPage(i);
+      strip.appendChild(img);
+    });
+
+    // Setup main viewer
+    cropGoToPage(0);
+    setupCropEvents();
+
+    // Open the container
+    document.getElementById('smart-crop-container').classList.add('open');
+    document.getElementById('extract-btn').disabled = false;
+
+  } catch(err){
+    toast('Error loading PDF: '+err.message,'error');
+    document.getElementById('extract-btn').disabled = false;
+  }
+}
+
+function cropGoToPage(idx){
+  CROP.currentPage = idx;
+  const img = document.getElementById('crop-main-img');
+  img.src = CROP.pages[idx];
+  img.onload = ()=>{
+    CROP.imgNaturalW = img.naturalWidth;
+    CROP.imgNaturalH = img.naturalHeight;
+  };
+  // Update counter
+  document.getElementById('crop-page-counter').textContent = 'Page '+(idx+1)+'/'+CROP.pages.length;
+  document.getElementById('crop-page-label').textContent = 'Page '+(idx+1);
+  // Update thumbnail highlights
+  document.querySelectorAll('.crop-page-thumb').forEach((t,i)=>{
+    t.classList.toggle('active', i===idx);
+  });
+  // Hide selection box
+  document.getElementById('crop-sel').style.display = 'none';
+}
+
+function setupCropEvents(){
+  const wrap = document.getElementById('crop-img-wrap');
+  const sel = document.getElementById('crop-sel');
+
+  const getPos = (e)=>{
+    const rect = wrap.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return {
+      x: Math.max(0, Math.min(clientX - rect.left, rect.width)),
+      y: Math.max(0, Math.min(clientY - rect.top, rect.height))
+    };
+  };
+
+  const onStart = (e)=>{
+    const pos = getPos(e);
+    CROP.startX = pos.x; CROP.startY = pos.y;
+    CROP.isDragging = true;
+    sel.style.cssText = 'display:block;left:'+pos.x+'px;top:'+pos.y+'px;width:0;height:0;position:absolute;border:2.5px solid #e94560;background:rgba(233,69,96,0.12);pointer-events:none;border-radius:3px';
+    e.preventDefault();
+  };
+
+  const onMove = (e)=>{
+    if(!CROP.isDragging) return;
+    const pos = getPos(e);
+    const x = Math.min(CROP.startX, pos.x);
+    const y = Math.min(CROP.startY, pos.y);
+    const w = Math.abs(pos.x - CROP.startX);
+    const h = Math.abs(pos.y - CROP.startY);
+    sel.style.left = x+'px'; sel.style.top = y+'px';
+    sel.style.width = w+'px'; sel.style.height = h+'px';
+    e.preventDefault();
+  };
+
+  const onEnd = (e)=>{
+    if(!CROP.isDragging) return;
+    CROP.isDragging = false;
+    const w = parseInt(sel.style.width)||0;
+    const h = parseInt(sel.style.height)||0;
+    if(w < 30 || h < 20){ sel.style.display='none'; return; }
+    // Crop!
+    doCrop(
+      parseInt(sel.style.left), parseInt(sel.style.top), w, h
+    );
+    sel.style.display = 'none';
+    e.preventDefault();
+  };
+
+  // Remove old listeners by cloning
+  const newWrap = wrap.cloneNode(true);
+  wrap.parentNode.replaceChild(newWrap, wrap);
+
+  newWrap.addEventListener('mousedown', onStart);
+  newWrap.addEventListener('mousemove', onMove);
+  newWrap.addEventListener('mouseup', onEnd);
+  newWrap.addEventListener('touchstart', onStart, {passive:false});
+  newWrap.addEventListener('touchmove', onMove, {passive:false});
+  newWrap.addEventListener('touchend', onEnd, {passive:false});
+}
+
+function doCrop(selX, selY, selW, selH){
+  const img = document.getElementById('crop-main-img');
+  const imgRect = img.getBoundingClientRect();
+  // Scale from display size to natural size
+  const scaleX = img.naturalWidth / imgRect.width;
+  const scaleY = img.naturalHeight / imgRect.height;
+  // Offset: wrap may have padding/margin from viewer
+  const wrapRect = document.getElementById('crop-img-wrap').getBoundingClientRect();
+  const offsetX = imgRect.left - wrapRect.left;
+  const offsetY = imgRect.top - wrapRect.top;
+  const cropX = (selX - offsetX) * scaleX;
+  const cropY = (selY - offsetY) * scaleY;
+  const cropW = selW * scaleX;
+  const cropH = selH * scaleY;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(cropW));
+  canvas.height = Math.max(1, Math.round(cropH));
+  canvas.getContext('2d').drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+  const croppedSrc = canvas.toDataURL('image/jpeg', 0.92);
+  saveCropQuestion(croppedSrc, CROP.currentPage);
+}
+
+function saveCropQuestion(imgSrc, pageIdx){
+  const qNum = CROP.questions.length + 1;
+  CROP.questions.push({
+    id: qNum,
+    image: imgSrc,
+    pageIdx,
+    subject: 'Physics',
+    topic: 'Unknown',
+    type: 'MCQ',
+    question: 'Q'+qNum+' (Page '+(pageIdx+1)+')',
+    options: [{label:'A',text:'Option A'},{label:'B',text:'Option B'},{label:'C',text:'Option C'},{label:'D',text:'Option D'}],
+    correctAnswer: '',
+    difficulty: 'Moderate',
+    hasDiagram: true,
+    solution: ''
+  });
+  // Update counter
+  document.getElementById('crop-q-counter').textContent = CROP.questions.length + ' questions';
+  // Mark thumb as done
+  const thumb = document.getElementById('crop-thumb-'+pageIdx);
+  if(thumb) thumb.classList.add('done');
+  // Add chip
+  addCropChip(qNum, imgSrc);
+  toast('Q'+qNum+' saved! ✓','success');
+}
+
+function addCropChip(qNum, imgSrc){
+  const chips = document.getElementById('crop-chips');
+  const chip = document.createElement('div');
+  chip.className = 'crop-chip';
+  chip.id = 'chip-'+qNum;
+  chip.innerHTML = '<img src="'+imgSrc+'"> <span>Q'+qNum+'</span> <span class="del" onclick="deleteCropQ('+qNum+')">✕</span>';
+  chips.appendChild(chip);
+  chips.scrollLeft = chips.scrollWidth;
+}
+
+function deleteCropQ(qNum){
+  CROP.questions = CROP.questions.filter(q=>q.id!==qNum);
+  const chip = document.getElementById('chip-'+qNum);
+  if(chip) chip.remove();
+  // Renumber
+  CROP.questions.forEach((q,i)=>{ q.id=i+1; });
+  document.getElementById('crop-q-counter').textContent = CROP.questions.length + ' questions';
+  toast('Q'+qNum+' removed','info');
+}
+
+function undoLastCrop(){
+  if(!CROP.questions.length){ toast('Nothing to undo','info'); return; }
+  const last = CROP.questions.pop();
+  const chip = document.getElementById('chip-'+last.id);
+  if(chip) chip.remove();
+  document.getElementById('crop-q-counter').textContent = CROP.questions.length + ' questions';
+  toast('Last crop undone','info');
+}
+
+function addFullPageAsQuestion(){
+  const src = CROP.pages[CROP.currentPage];
+  saveCropQuestion(src, CROP.currentPage);
+}
+
+function cropPrevPage(){
+  if(CROP.currentPage > 0) cropGoToPage(CROP.currentPage-1);
+}
+function cropNextPage(){
+  if(CROP.currentPage < CROP.pages.length-1) cropGoToPage(CROP.currentPage+1);
+}
+
+function closeSmartCrop(){
+  document.getElementById('smart-crop-container').classList.remove('open');
+  CROP.questions = [];
+}
+
+function finishSmartCrop(){
+  if(!CROP.questions.length){
+    toast('Please crop at least one question!','error');
+    return;
+  }
+  // Renumber
+  const finalQs = CROP.questions.map((q,i)=>({...q, id:i+1}));
+  APP.extractedQuestions = finalQs;
+  document.getElementById('smart-crop-container').classList.remove('open');
+  const name = document.getElementById('test-name-input').value || 'My Test';
+  showPreview(finalQs, name);
+  toast(finalQs.length+' questions ready! Review and start test.','success');
+}
+
 
 // ===================== PDF EXTRACTION =====================
 
