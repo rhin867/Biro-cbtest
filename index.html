@@ -1415,6 +1415,47 @@ function setExtractionStatus(msg, pct){
   if(f) f.style.width = Math.min(100, pct) + '%';
 }
 
+async function extractPDFText(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  let fullText = '';
+  const images = [];
+  for(let i=1; i<=pdf.numPages; i++){
+    setExtractionStatus('Reading page '+i+'/'+pdf.numPages+'...', Math.round((i/pdf.numPages)*14)+1);
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items.map(s=>s.str).join(' ');
+    fullText += pageText + '
+
+';
+    const viewport = page.getViewport({scale:1.5});
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+    images.push(canvas.toDataURL('image/jpeg',0.8));
+  }
+  return {text: fullText, images};
+}
+
+async function renderAllPDFPages(file){
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+  const pages = [];
+  const total = pdf.numPages;
+  for(let i=1; i<=total; i++){
+    setExtractionStatus('Rendering page '+i+'/'+total+'...', Math.round((i/total)*14)+1);
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({scale:2.0});
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+    pages.push(canvas.toDataURL('image/jpeg',0.85));
+  }
+  return pages;
+}
+
 async function extractAndCreate(){
   const name = document.getElementById('test-name-input').value || 'My Test';
   const file = APP.uploadedFiles.pdf;
@@ -1477,26 +1518,7 @@ async function extractAndCreate(){
   document.getElementById('extract-btn').disabled = false;
 }
 
-// Render ALL pages of PDF to base64 images
-async function renderAllPDFPages(file){
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-  const pages = [];
-  const total = pdf.numPages;
-
-  for(let i=1; i<=total; i++){
-    setExtractionStatus(`Rendering page ${i}/${total}...`, Math.round((i/total)*14)+1);
-    const page = await pdf.getPage(i);
-    const viewport = page.getViewport({scale: 2.0}); // High quality
-    const canvas = document.createElement('canvas');
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    const ctx = canvas.getContext('2d');
-    await page.render({canvasContext: ctx, viewport}).promise;
-    pages.push(canvas.toDataURL('image/jpeg', 0.85));
-  }
-  return pages;
-}
+// renderAllPDFPages defined above
 
 // Extract questions from text PDF — also attach diagrams from images
 async function extractFromTextWithDiagrams(text, pageImages, name){
