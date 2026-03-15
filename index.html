@@ -10,7 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://unpkg.com/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 <style>
 :root {
   --primary: #5b4fcf;
@@ -1549,13 +1549,9 @@ async function extractFromPages_Tesseract(pageImages, name){
       }
     });
   } catch(e){
-    // Tesseract failed - fall back to AI if key exists
-    const aiKey = localStorage.getItem('gemini_key') || localStorage.getItem('openai_key');
-    if(aiKey){
-      setExtractionStatus('OCR unavailable - using AI Vision...', 20);
-      return await extractFromPages_AI(pageImages, name);
-    }
-    throw new Error('OCR failed and no API key set. Please add API key in Settings.');
+    // Tesseract failed - use regex parser on rendered page text (NO AI images)
+    setExtractionStatus('OCR engine loading failed - trying text extraction...', 20);
+    worker = null;
   }
 
   // OCR each page + detect diagrams
@@ -1564,20 +1560,18 @@ async function extractFromPages_Tesseract(pageImages, name){
     setExtractionStatus('OCR page '+(i+1)+'/'+total+'...', pct);
 
     try{
+      if(!worker) throw new Error('no worker');
       const {data} = await worker.recognize(pageImages[i]);
       allText += '--- PAGE '+(i+1)+' ---\n' + data.text + '\n\n';
-
-      // Detect if page has diagrams (check if text is sparse = diagram heavy page)
-      const textDensity = data.text.trim().length / 100;
       const hasDiagram = await detectDiagramOnPage(pageImages[i], data.text);
-      pageDiagrams.push({ img: pageImages[i], hasDiagram, pageNum: i+1, textDensity });
+      pageDiagrams.push({ img: pageImages[i], hasDiagram, pageNum: i+1 });
     } catch(e){
-      allText += '--- PAGE '+(i+1)+' ---\n[OCR failed]\n\n';
+      allText += '--- PAGE '+(i+1)+' ---\n\n';
       pageDiagrams.push({ img: pageImages[i], hasDiagram: false, pageNum: i+1 });
     }
   }
 
-  await worker.terminate();
+  if(worker){ try{ await worker.terminate(); }catch(e){} }
 
   // Parse questions from OCR text
   setExtractionStatus('Parsing questions from OCR text...', 70);
