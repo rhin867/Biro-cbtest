@@ -1407,6 +1407,14 @@ async function callAI(prompt, provider='gemini'){
 }
 
 // ===================== PDF EXTRACTION =====================
+
+function setExtractionStatus(msg, pct){
+  const s = document.getElementById('extraction-status');
+  const f = document.getElementById('extraction-fill');
+  if(s) s.textContent = msg;
+  if(f) f.style.width = Math.min(100, pct) + '%';
+}
+
 async function extractAndCreate(){
   const name = document.getElementById('test-name-input').value || 'My Test';
   const file = APP.uploadedFiles.pdf;
