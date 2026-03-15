@@ -516,9 +516,9 @@ tr:hover td{background:var(--bg3)}
             <div id="mode-crop-card" onclick="selectExtractionMode('crop')" style="border:2.5px solid var(--border);border-radius:var(--radius);padding:18px;cursor:pointer;transition:all .2s;position:relative">
               <div style="font-size:28px;margin-bottom:8px">✂️</div>
               <div style="font-weight:800;font-size:14px;margin-bottom:6px">Smart Crop</div>
-              <div style="font-size:12px;color:var(--text3);line-height:1.5">PDF pages shown as images. Draw boxes around each question — question image saved directly. No AI needed!</div>
-              <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--accent2)">✓ 100% FREE, no API</div>
-              <div style="font-size:11px;color:var(--text3)">~1-2 min, diagrams included</div>
+              <div style="font-size:12px;color:var(--text3);line-height:1.5">AI scans each page, finds exact question regions, crops each question automatically — diagram included!</div>
+              <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--accent2)">✓ Exact question images, no user input</div>
+              <div style="font-size:11px;color:var(--text3)">~1-3 min, needs API key</div>
             </div>
 
           </div>
@@ -1505,284 +1505,355 @@ async function callAI(prompt, provider='gemini'){
 }
 
 // ===================== EXTRACTION MODE SELECTOR =====================
-let APP_extractionMode = 'auto'; // 'auto' or 'crop'
+let APP_extractionMode = 'auto';
 
 function showExtractionModeSelector(){
   const file = APP.uploadedFiles.pdf;
   if(!file){ toast('Please upload a PDF or image first','error'); return; }
   document.getElementById('extraction-mode-selector').style.display = 'block';
-  document.getElementById('extraction-mode-selector').scrollIntoView({behavior:'smooth', block:'nearest'});
+  document.getElementById('extraction-mode-selector').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
 function selectExtractionMode(mode){
   APP_extractionMode = mode;
-  // Update card styles
   document.getElementById('mode-auto-card').classList.toggle('selected', mode==='auto');
   document.getElementById('mode-crop-card').classList.toggle('selected', mode==='crop');
-  // Show hint
   const hint = document.getElementById('selected-mode-hint');
   hint.style.display = 'block';
-  if(mode === 'auto'){
-    hint.style.background = 'var(--primary-bg)';
-    hint.style.color = 'var(--primary)';
-    hint.textContent = '🤖 Auto mode selected — OCR will extract text, AI will parse questions. API key needed for text parsing.';
+  if(mode==='auto'){
+    hint.style.background='var(--primary-bg)'; hint.style.color='var(--primary)';
+    hint.textContent='🤖 Auto mode — OCR + AI parses questions. API key needed.';
   } else {
-    hint.style.background = '#f0fdf4';
-    hint.style.color = '#16a34a';
-    hint.textContent = '✂️ Smart Crop selected — You draw boxes around questions. 100% FREE, diagrams included automatically!';
+    hint.style.background='#f0fdf4'; hint.style.color='#16a34a';
+    hint.textContent='✂️ Smart Crop — Detects question boundaries automatically using PDF structure. 100% FREE, no API, unlimited pages!';
   }
-  // Show start button
   const btn = document.getElementById('start-extraction-btn');
-  btn.style.display = 'flex';
-  btn.textContent = mode==='auto' ? '🤖 Start Auto Extraction →' : '✂️ Start Smart Crop →';
+  btn.style.display='flex';
+  btn.textContent = mode==='auto' ? '🤖 Start Auto Extraction →' : '✂️ Start Smart Crop (FREE) →';
 }
 
 async function startSelectedExtraction(){
-  document.getElementById('extraction-mode-selector').style.display = 'none';
-  if(APP_extractionMode === 'crop'){
-    await startSmartCropMode();
+  document.getElementById('extraction-mode-selector').style.display='none';
+  if(APP_extractionMode==='crop'){
+    await startJSSmartCrop();
   } else {
     await extractAndCreate();
   }
 }
 
-// ===================== SMART CROP MODE =====================
-let CROP = {
-  pages: [],         // base64 page images
-  currentPage: 0,
-  questions: [],     // [{image, pageIdx}]
-  isDragging: false,
-  startX: 0, startY: 0,
-  imgNaturalW: 0, imgNaturalH: 0
-};
+// ===================== JS SMART CROP (0 API calls, 100% FREE) =====================
+// Uses PDF.js text positions to find question boundaries
+// Then renders pages as images and crops each question region
 
-async function startSmartCropMode(){
+async function startJSSmartCrop(){
   const file = APP.uploadedFiles.pdf;
   if(!file){ toast('Upload a PDF first','error'); return; }
 
-  toast('Loading PDF pages...','info');
   document.getElementById('extract-btn').disabled = true;
+  document.getElementById('extraction-progress').style.display = 'block';
 
   try{
-    // Render all pages
-    const pages = await renderAllPDFPages(file);
-    CROP.pages = pages;
-    CROP.currentPage = 0;
-    CROP.questions = [];
+    setExtractionStatus('Reading PDF structure...', 5);
 
-    // Build thumbnail strip
-    const strip = document.getElementById('crop-pages-strip');
-    strip.innerHTML = '';
-    pages.forEach((src, i)=>{
-      const img = document.createElement('img');
-      img.src = src;
-      img.className = 'crop-page-thumb' + (i===0?' active':'');
-      img.id = 'crop-thumb-'+i;
-      img.title = 'Page '+(i+1);
-      img.onclick = ()=> cropGoToPage(i);
-      strip.appendChild(img);
-    });
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+    const totalPages = pdf.numPages;
 
-    // Setup main viewer
-    cropGoToPage(0);
-    setupCropEvents();
+    setExtractionStatus('Analyzing text positions on all pages...', 10);
 
-    // Open the container
-    document.getElementById('smart-crop-container').classList.add('open');
-    document.getElementById('extract-btn').disabled = false;
+    // Step 1: Extract text with positions from ALL pages
+    const allPageData = [];
+    for(let p=1; p<=totalPages; p++){
+      const pct = Math.round(10 + (p/totalPages)*30);
+      setExtractionStatus('Reading page '+p+'/'+totalPages+'...', pct);
+      const pageData = await extractPageTextWithPositions(pdf, p);
+      allPageData.push(pageData);
+    }
+
+    // Step 2: Find question boundaries using text positions
+    setExtractionStatus('Detecting question boundaries...', 42);
+    const questionRegions = detectQuestionRegions(allPageData);
+
+    if(questionRegions.length === 0){
+      throw new Error('No question patterns found. Try Auto Extract mode.');
+    }
+
+    setExtractionStatus('Found '+questionRegions.length+' questions. Rendering pages...', 45);
+
+    // Step 3: Render pages as high-quality images
+    const pageImages = {};
+    const uniquePages = [...new Set(questionRegions.map(r=>r.pageIndex))];
+    for(let i=0; i<uniquePages.length; i++){
+      const pgIdx = uniquePages[i];
+      const pct = Math.round(45 + (i/uniquePages.length)*35);
+      setExtractionStatus('Rendering page '+(pgIdx+1)+'...', pct);
+      pageImages[pgIdx] = await renderSinglePage(pdf, pgIdx+1);
+    }
+
+    // Step 4: Crop each question from its page image
+    setExtractionStatus('Cropping question images...', 82);
+    const questions = [];
+    for(let i=0; i<questionRegions.length; i++){
+      const region = questionRegions[i];
+      const pageImg = pageImages[region.pageIndex];
+      if(!pageImg) continue;
+      try{
+        const croppedImg = await cropImageByPercent(
+          pageImg,
+          region.xPct,
+          region.yPct,
+          region.wPct,
+          region.hPct
+        );
+        questions.push({
+          id: i+1,
+          image: croppedImg,
+          pageIdx: region.pageIndex,
+          subject: region.subject || 'Physics',
+          topic: 'Unknown',
+          type: region.type || 'MCQ',
+          question: 'Q'+(region.questionNum)+' (Page '+(region.pageIndex+1)+')',
+          options: region.type !== 'INTEGER'
+            ? [{label:'A',text:'A'},{label:'B',text:'B'},{label:'C',text:'C'},{label:'D',text:'D'}]
+            : [],
+          correctAnswer: region.correctAnswer || '',
+          difficulty: 'Moderate',
+          hasDiagram: true,
+          solution: ''
+        });
+      } catch(e){ /* skip bad crops */ }
+    }
+
+    if(!questions.length) throw new Error('Could not crop any questions. Try Auto Extract mode.');
+
+    setExtractionStatus('Done! '+questions.length+' questions cropped.', 100);
+    setTimeout(()=>document.getElementById('extraction-progress').style.display='none', 800);
+
+    APP.extractedQuestions = questions;
+    const name = document.getElementById('test-name-input').value || 'My Test';
+    showPreview(questions, name);
+    toast(questions.length+' questions auto-cropped! 100% FREE ✓','success');
 
   } catch(err){
-    toast('Error loading PDF: '+err.message,'error');
-    document.getElementById('extract-btn').disabled = false;
+    toast('Error: '+err.message,'error');
+    document.getElementById('extraction-progress').style.display='none';
   }
+  document.getElementById('extract-btn').disabled = false;
 }
 
-function cropGoToPage(idx){
-  CROP.currentPage = idx;
-  const img = document.getElementById('crop-main-img');
-  img.src = CROP.pages[idx];
-  img.onload = ()=>{
-    CROP.imgNaturalW = img.naturalWidth;
-    CROP.imgNaturalH = img.naturalHeight;
-  };
-  // Update counter
-  document.getElementById('crop-page-counter').textContent = 'Page '+(idx+1)+'/'+CROP.pages.length;
-  document.getElementById('crop-page-label').textContent = 'Page '+(idx+1);
-  // Update thumbnail highlights
-  document.querySelectorAll('.crop-page-thumb').forEach((t,i)=>{
-    t.classList.toggle('active', i===idx);
-  });
-  // Hide selection box
-  document.getElementById('crop-sel').style.display = 'none';
-}
+// Extract text items with their Y positions from a PDF page
+async function extractPageTextWithPositions(pdf, pageNum){
+  const page = await pdf.getPage(pageNum);
+  const viewport = page.getViewport({scale:1.0});
+  const textContent = await page.getTextContent();
 
-function setupCropEvents(){
-  const wrap = document.getElementById('crop-img-wrap');
-  const sel = document.getElementById('crop-sel');
-
-  const getPos = (e)=>{
-    const rect = wrap.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const items = textContent.items.map(item=>{
+    const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
     return {
-      x: Math.max(0, Math.min(clientX - rect.left, rect.width)),
-      y: Math.max(0, Math.min(clientY - rect.top, rect.height))
+      text: item.str,
+      x: tx[4],                          // x position in points
+      y: viewport.height - tx[5],        // y from TOP (PDF y is from bottom)
+      width: item.width,
+      height: item.height,
+      fontSize: Math.abs(item.transform[0])
     };
+  }).filter(item => item.text.trim().length > 0);
+
+  return {
+    pageNum,
+    pageIndex: pageNum-1,
+    pageWidth: viewport.width,
+    pageHeight: viewport.height,
+    items
   };
-
-  const onStart = (e)=>{
-    const pos = getPos(e);
-    CROP.startX = pos.x; CROP.startY = pos.y;
-    CROP.isDragging = true;
-    sel.style.cssText = 'display:block;left:'+pos.x+'px;top:'+pos.y+'px;width:0;height:0;position:absolute;border:2.5px solid #e94560;background:rgba(233,69,96,0.12);pointer-events:none;border-radius:3px';
-    e.preventDefault();
-  };
-
-  const onMove = (e)=>{
-    if(!CROP.isDragging) return;
-    const pos = getPos(e);
-    const x = Math.min(CROP.startX, pos.x);
-    const y = Math.min(CROP.startY, pos.y);
-    const w = Math.abs(pos.x - CROP.startX);
-    const h = Math.abs(pos.y - CROP.startY);
-    sel.style.left = x+'px'; sel.style.top = y+'px';
-    sel.style.width = w+'px'; sel.style.height = h+'px';
-    e.preventDefault();
-  };
-
-  const onEnd = (e)=>{
-    if(!CROP.isDragging) return;
-    CROP.isDragging = false;
-    const w = parseInt(sel.style.width)||0;
-    const h = parseInt(sel.style.height)||0;
-    if(w < 30 || h < 20){ sel.style.display='none'; return; }
-    // Crop!
-    doCrop(
-      parseInt(sel.style.left), parseInt(sel.style.top), w, h
-    );
-    sel.style.display = 'none';
-    e.preventDefault();
-  };
-
-  // Remove old listeners by cloning
-  const newWrap = wrap.cloneNode(true);
-  wrap.parentNode.replaceChild(newWrap, wrap);
-
-  newWrap.addEventListener('mousedown', onStart);
-  newWrap.addEventListener('mousemove', onMove);
-  newWrap.addEventListener('mouseup', onEnd);
-  newWrap.addEventListener('touchstart', onStart, {passive:false});
-  newWrap.addEventListener('touchmove', onMove, {passive:false});
-  newWrap.addEventListener('touchend', onEnd, {passive:false});
 }
 
-function doCrop(selX, selY, selW, selH){
-  const img = document.getElementById('crop-main-img');
-  const imgRect = img.getBoundingClientRect();
-  // Scale from display size to natural size
-  const scaleX = img.naturalWidth / imgRect.width;
-  const scaleY = img.naturalHeight / imgRect.height;
-  // Offset: wrap may have padding/margin from viewer
-  const wrapRect = document.getElementById('crop-img-wrap').getBoundingClientRect();
-  const offsetX = imgRect.left - wrapRect.left;
-  const offsetY = imgRect.top - wrapRect.top;
-  const cropX = (selX - offsetX) * scaleX;
-  const cropY = (selY - offsetY) * scaleY;
-  const cropW = selW * scaleX;
-  const cropH = selH * scaleY;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(cropW));
-  canvas.height = Math.max(1, Math.round(cropH));
-  canvas.getContext('2d').drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-  const croppedSrc = canvas.toDataURL('image/jpeg', 0.92);
-  saveCropQuestion(croppedSrc, CROP.currentPage);
-}
+// Detect question start positions using text patterns
+function detectQuestionRegions(allPageData){
+  const regions = [];
 
-function saveCropQuestion(imgSrc, pageIdx){
-  const qNum = CROP.questions.length + 1;
-  CROP.questions.push({
-    id: qNum,
-    image: imgSrc,
-    pageIdx,
-    subject: 'Physics',
-    topic: 'Unknown',
-    type: 'MCQ',
-    question: 'Q'+qNum+' (Page '+(pageIdx+1)+')',
-    options: [{label:'A',text:'Option A'},{label:'B',text:'Option B'},{label:'C',text:'Option C'},{label:'D',text:'Option D'}],
-    correctAnswer: '',
-    difficulty: 'Moderate',
-    hasDiagram: true,
-    solution: ''
-  });
-  // Update counter
-  document.getElementById('crop-q-counter').textContent = CROP.questions.length + ' questions';
-  // Mark thumb as done
-  const thumb = document.getElementById('crop-thumb-'+pageIdx);
-  if(thumb) thumb.classList.add('done');
-  // Add chip
-  addCropChip(qNum, imgSrc);
-  toast('Q'+qNum+' saved! ✓','success');
-}
+  // Question number patterns:
+  // "Q.1", "Q1.", "Q. 1", "1.", "1)", "Q1", "(1)", "Ques.1"
+  const Q_PATTERN = /^(?:Q\.?\s*|Ques(?:tion)?\.?\s*)?(\d{1,3})[.)]\s*$/i;
+  const Q_INLINE  = /^(?:Q\.?\s*|Ques(?:tion)?\.?\s*)(\d{1,3})\b/i;
 
-function addCropChip(qNum, imgSrc){
-  const chips = document.getElementById('crop-chips');
-  const chip = document.createElement('div');
-  chip.className = 'crop-chip';
-  chip.id = 'chip-'+qNum;
-  chip.innerHTML = '<img src="'+imgSrc+'"> <span>Q'+qNum+'</span> <span class="del" onclick="deleteCropQ('+qNum+')">✕</span>';
-  chips.appendChild(chip);
-  chips.scrollLeft = chips.scrollWidth;
-}
+  // Collect all question start points across all pages
+  const allStarts = [];
 
-function deleteCropQ(qNum){
-  CROP.questions = CROP.questions.filter(q=>q.id!==qNum);
-  const chip = document.getElementById('chip-'+qNum);
-  if(chip) chip.remove();
-  // Renumber
-  CROP.questions.forEach((q,i)=>{ q.id=i+1; });
-  document.getElementById('crop-q-counter').textContent = CROP.questions.length + ' questions';
-  toast('Q'+qNum+' removed','info');
-}
+  for(const pageData of allPageData){
+    const {items, pageIndex, pageHeight, pageWidth} = pageData;
 
-function undoLastCrop(){
-  if(!CROP.questions.length){ toast('Nothing to undo','info'); return; }
-  const last = CROP.questions.pop();
-  const chip = document.getElementById('chip-'+last.id);
-  if(chip) chip.remove();
-  document.getElementById('crop-q-counter').textContent = CROP.questions.length + ' questions';
-  toast('Last crop undone','info');
-}
+    for(let i=0; i<items.length; i++){
+      const item = items[i];
+      const txt = item.text.trim();
 
-function addFullPageAsQuestion(){
-  const src = CROP.pages[CROP.currentPage];
-  saveCropQuestion(src, CROP.currentPage);
-}
+      let qNum = null;
 
-function cropPrevPage(){
-  if(CROP.currentPage > 0) cropGoToPage(CROP.currentPage-1);
-}
-function cropNextPage(){
-  if(CROP.currentPage < CROP.pages.length-1) cropGoToPage(CROP.currentPage+1);
-}
+      // Try standalone number like "1." or "Q.1"
+      const m1 = txt.match(Q_PATTERN);
+      if(m1) qNum = parseInt(m1[1]);
 
-function closeSmartCrop(){
-  document.getElementById('smart-crop-container').classList.remove('open');
-  CROP.questions = [];
-}
+      // Try inline "Q1 text..." — first word is Q+number
+      if(!qNum){
+        const m2 = txt.match(Q_INLINE);
+        if(m2) qNum = parseInt(m2[1]);
+      }
 
-function finishSmartCrop(){
-  if(!CROP.questions.length){
-    toast('Please crop at least one question!','error');
-    return;
+      // Validate: question numbers should be 1-150, and font should be reasonable
+      if(qNum && qNum >= 1 && qNum <= 150){
+        // Extra check: make sure it's not a sub-item (should be leftish on page)
+        const xPct = (item.x / pageWidth) * 100;
+        if(xPct < 25){ // question numbers are usually in left 25% of page
+          allStarts.push({
+            pageIndex,
+            pageHeight,
+            pageWidth,
+            questionNum: qNum,
+            yPos: item.y,        // y in points from top
+            xPos: item.x,
+            items: pageData.items // reference to page items
+          });
+        }
+      }
+    }
   }
-  // Renumber
-  const finalQs = CROP.questions.map((q,i)=>({...q, id:i+1}));
-  APP.extractedQuestions = finalQs;
-  document.getElementById('smart-crop-container').classList.remove('open');
-  const name = document.getElementById('test-name-input').value || 'My Test';
-  showPreview(finalQs, name);
-  toast(finalQs.length+' questions ready! Review and start test.','success');
+
+  // Sort by page then by y position
+  allStarts.sort((a,b)=> a.pageIndex!==b.pageIndex
+    ? a.pageIndex-b.pageIndex
+    : a.yPos-b.yPos
+  );
+
+  // Remove duplicates (same question number on same page, keep topmost)
+  const seen = new Set();
+  const uniqueStarts = allStarts.filter(s=>{
+    const key = s.pageIndex+'-'+s.questionNum;
+    if(seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+
+  // Build regions: from question start to next question start (or page end)
+  for(let i=0; i<uniqueStarts.length; i++){
+    const curr = uniqueStarts[i];
+    const next = uniqueStarts[i+1];
+
+    // Top Y: a bit above the question number (5% padding)
+    const topPadding = curr.pageHeight * 0.012;
+    const topY = Math.max(0, curr.yPos - topPadding);
+
+    let bottomY;
+    if(next && next.pageIndex === curr.pageIndex){
+      // Next question is on same page — end just before it
+      bottomY = next.yPos - (curr.pageHeight * 0.008);
+    } else {
+      // Last question on page — go to 97% of page height
+      bottomY = curr.pageHeight * 0.97;
+    }
+
+    // Detect question type from nearby text
+    let type = 'MCQ';
+    let correctAnswer = '';
+    const pageItems = curr.items;
+    const regionItems = pageItems.filter(item=>
+      item.y >= topY && item.y <= bottomY
+    );
+    const regionText = regionItems.map(i=>i.text).join(' ').toLowerCase();
+
+    if(regionText.includes('integer') || regionText.includes('numerical') ||
+       regionText.includes('type-2') || regionText.includes('section b')){
+      type = 'INTEGER';
+    } else if(regionText.includes('multiple') || regionText.includes('more than one')){
+      type = 'MULTIPLE';
+    }
+
+    // Look for answer key in text (e.g. "Ans: A" or "Answer: B")
+    const ansMatch = regionText.match(/ans(?:wer)?[:\s]+([a-d]|\d+)/i);
+    if(ansMatch) correctAnswer = ansMatch[1].toUpperCase();
+
+    // Detect subject from keywords
+    let subject = 'Physics';
+    const physicsKw = ['velocity','force','current','voltage','circuit','magnetic','electric','motion','energy','wave','optics'];
+    const chemKw = ['mole','reaction','compound','element','acid','base','organic','bond','atom','solution','equilibrium'];
+    const mathKw = ['function','matrix','determinant','integral','limit','derivative','vector','probability','sequence','series'];
+    const countKw = (kws)=> kws.filter(k=>regionText.includes(k)).length;
+    const pScore=countKw(physicsKw), cScore=countKw(chemKw), mScore=countKw(mathKw);
+    if(mScore>pScore && mScore>cScore) subject='Mathematics';
+    else if(cScore>pScore) subject='Chemistry';
+
+    // Convert y positions to percentages
+    const yPct = (topY / curr.pageHeight) * 100;
+    const hPct = ((bottomY - topY) / curr.pageHeight) * 100;
+    const xPct = 1; // start from 1% (include left margin)
+    const wPct = 98; // go to 99% (include right margin)
+
+    regions.push({
+      pageIndex: curr.pageIndex,
+      questionNum: curr.questionNum,
+      yPct: Math.max(0, yPct),
+      xPct,
+      wPct,
+      hPct: Math.min(100-yPct, Math.max(5, hPct)),
+      type,
+      subject,
+      correctAnswer
+    });
+  }
+
+  return regions;
 }
+
+// Render a single PDF page to a high-quality image
+async function renderSinglePage(pdf, pageNum){
+  const page = await pdf.getPage(pageNum);
+  const viewport = page.getViewport({scale:2.5}); // High quality for crisp crops
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({canvasContext:canvas.getContext('2d'), viewport}).promise;
+  return canvas.toDataURL('image/jpeg', 0.95);
+}
+
+// Crop image by percentage coordinates
+function cropImageByPercent(imgSrc, xPct, yPct, wPct, hPct){
+  return new Promise((resolve, reject)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const W = img.naturalWidth, H = img.naturalHeight;
+        const x = Math.max(0, (xPct/100)*W);
+        const y = Math.max(0, (yPct/100)*H);
+        const w = Math.min(W-x, (wPct/100)*W);
+        const h = Math.min(H-y, (hPct/100)*H);
+        if(w<20||h<20){ reject(new Error('Too small')); return; }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(w);
+        canvas.height = Math.round(h);
+        canvas.getContext('2d').drawImage(img, x, y, w, h, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.95));
+      } catch(e){ reject(e); }
+    };
+    img.onerror = ()=>reject(new Error('Load failed'));
+    img.src = imgSrc;
+  });
+}
+
+// Stubs for HTML compatibility
+let CROP = {pages:[],currentPage:0,questions:[]};
+async function startSmartCropMode(){ await startJSSmartCrop(); }
+function cropGoToPage(i){ CROP.currentPage=i; }
+function cropPrevPage(){ if(CROP.currentPage>0) cropGoToPage(CROP.currentPage-1); }
+function cropNextPage(){ if(CROP.currentPage<CROP.pages.length-1) cropGoToPage(CROP.currentPage+1); }
+function closeSmartCrop(){ document.getElementById('smart-crop-container').classList.remove('open'); }
+function finishSmartCrop(){
+  if(!CROP.questions.length){toast('No questions!','error');return;}
+  APP.extractedQuestions=CROP.questions.map((q,i)=>({...q,id:i+1}));
+  document.getElementById('smart-crop-container').classList.remove('open');
+  showPreview(APP.extractedQuestions,document.getElementById('test-name-input').value||'My Test');
+}
+function undoLastCrop(){}
+function addFullPageAsQuestion(){}
+function setupCropEvents(){}
+function deleteCropQ(){}
 
 
 // ===================== PDF EXTRACTION =====================
